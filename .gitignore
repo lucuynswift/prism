@@ -1,0 +1,13 @@
+# 文件位置：本地 prism-main/.gitignore
+# ★ 此文件无需填写，直接复制使用
+
+# 密钥文件，绝不上传
+.streamlit/secrets.toml
+.env
+*.db
+
+# Python 缓存
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
