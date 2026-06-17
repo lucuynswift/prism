@@ -97,11 +97,16 @@ nltk.download('wordnet', quiet=True)
 nltk.download('omw-1.4', quiet=True)
 lemmatizer = WordNetLemmatizer()
 
-# [改动2] 路径配置：本地路径全部移除，改为 GitHub 动态加载
-# 书籍数据由 data_loader.load_book_from_github() 从 GitHub 仓库拉取
-# 行为日志存到 /tmp（Streamlit Cloud 唯一可写目录）
-BASE_DIR  = Path("/tmp/prism")
-BASE_DIR.mkdir(exist_ok=True)
+# # [改动2] 路径配置：本地路径全部移除，改为 GitHub 动态加载
+# # 书籍数据由 data_loader.load_book_from_github() 从 GitHub 仓库拉取
+# # 行为日志存到 /tmp（Streamlit Cloud 唯一可写目录）
+# BASE_DIR  = Path("/tmp/prism")
+# BASE_DIR.mkdir(exist_ok=True)
+#############################################################################
+# [改动A] 自托管服务器上 /opt/prism 可持久写入，不再用 /tmp
+BASE_DIR = Path("/opt/prism/logs")
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+#############################################################################
 # BUILT_IN_BOOKS 保留变量名供后续代码兼容，内容来自 book_registry
 BUILT_IN_BOOKS = [v["slug"] for v in BOOK_REGISTRY.values()]
 
@@ -540,9 +545,12 @@ def compute_dep_distances(sent_deps_df: pd.DataFrame) -> dict:
 # ===================================================================
 # 行为数据持久化
 # ===================================================================
+# def get_behavior_log_path(username: str) -> Path:
+#     # [改动2] Streamlit Cloud 只有 /tmp 可写
+#     return Path("/tmp/prism") / f"reading_behavior_{username}.jsonl"
+
 def get_behavior_log_path(username: str) -> Path:
-    # [改动2] Streamlit Cloud 只有 /tmp 可写
-    return Path("/tmp/prism") / f"reading_behavior_{username}.jsonl"
+    return BASE_DIR / f"reading_behavior_{username}.jsonl"
 
 def append_behavior_record(username: str, record: dict):
     path = get_behavior_log_path(username)

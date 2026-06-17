@@ -16,7 +16,7 @@ from collections import Counter
 from nltk.stem import WordNetLemmatizer
 import re
 
-CACHE_DIR = Path("/tmp/prism_cache")
+CACHE_DIR = Path("/opt/prism/cache")
 CACHE_DIR.mkdir(exist_ok=True)
 lemmatizer = WordNetLemmatizer()
 

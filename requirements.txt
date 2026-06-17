@@ -4,3 +4,8 @@ plotly>=5.18.0
 requests>=2.31.0
 nltk>=3.8.1
 edge-tts>=6.1.9
+
+# 方案A Paddle：无需额外依赖，用 requests 调用即可
+# 方案B Ko-fi：无需额外依赖
+# 方案C Stripe：取消下面这行注释
+# stripe>=9.0.0
