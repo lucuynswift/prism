@@ -1,3 +1,4 @@
+# streamlit run "D:\prism-main\app.py"
 # ============================================================
 # 文件② prism-main/auth.py（Gumroad 版本）
 #

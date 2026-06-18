@@ -10,7 +10,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-from pathlib import Path
+#from pathlib import Path
 from collections import Counter
 import plotly.express as px
 import plotly.graph_objects as go
@@ -28,6 +28,9 @@ import secrets
 import asyncio
 import edge_tts
 import tempfile
+from pathlib import Path
+# 🔍 补上这行：定义服务器上存放词汇表（COCA等）的绝对路径
+WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
 
 # [改动1] 正式部署新增：认证、数据加载、书单三个本地模块
 from auth import render_auth_sidebar, render_subscription_sidebar, check_subscription
