@@ -846,7 +846,7 @@ render_subscription_sidebar()
 # 1. 检查名为 "sub" 的缓存格子是否存在（必须加引号，代表字符串键名）
 if "sub" not in st.session_state:
     # 2. 如果不存在，调用函数拿结果，并存入缓存（点语法 st.session_state.sub 是完全正确的）
-    st.session_state.sub = check_subscription(username)
+    st.session_state.sub = check_subscription()
 
 # 3. 从缓存中取出值，赋给本地变量 sub 供后续代码使用
 sub = st.session_state.sub
