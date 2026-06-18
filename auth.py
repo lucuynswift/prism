@@ -68,6 +68,7 @@ def render_auth_sidebar():
             st.session_state["auth_token"]   = None
             st.session_state.pop("_subscription_cache",      None)
             st.session_state.pop("_subscription_cache_time", None)
+            st.session_state.pop("sub", None)  # 如果你换成了 sub
             st.rerun()
         return
 
@@ -279,6 +280,8 @@ def _render_license_input():
             # 清除订阅缓存，让下次查询拿到最新状态
             st.session_state.pop("_subscription_cache",      None)
             st.session_state.pop("_subscription_cache_time", None)
+            # 🔥 你只需要在这里，全自动地把你在 app.py 里新定义的 "sub" 缓存也擦除掉：
+            st.session_state.pop("sub", None)
             st.rerun()
         else:
             err = data.get("detail", "Activation failed.")

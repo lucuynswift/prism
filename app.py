@@ -93,8 +93,8 @@ try:
 except ImportError:
     GRAPHVIZ_AVAILABLE = False
 
-nltk.download('wordnet', quiet=True)
-nltk.download('omw-1.4', quiet=True)
+#nltk.download('wordnet', quiet=True)
+#nltk.download('omw-1.4', quiet=True)
 lemmatizer = WordNetLemmatizer()
 
 # # [改动2] 路径配置：本地路径全部移除，改为 GitHub 动态加载
@@ -838,7 +838,19 @@ username = st.session_state.current_user
 
 # ── 订阅状态 + 付款入口 ──
 render_subscription_sidebar()
-sub = check_subscription()
+#sub = check_subscription()
+
+# ══════════════════════════════════════════════════════════════
+# 优化后：仅在初次登录或状态不存在时请求一次，之后点击按钮直接读内存
+# ══════════════════════════════════════════════════════════════
+# 1. 检查名为 "sub" 的缓存格子是否存在（必须加引号，代表字符串键名）
+if "sub" not in st.session_state:
+    # 2. 如果不存在，调用函数拿结果，并存入缓存（点语法 st.session_state.sub 是完全正确的）
+    st.session_state.sub = check_subscription(username)
+
+# 3. 从缓存中取出值，赋给本地变量 sub 供后续代码使用
+sub = st.session_state.sub
+
 
 # ── [改动5] 免费体验策略 ──────────────────────────────────────────
 # 注册后 14 天：全功能不限量
