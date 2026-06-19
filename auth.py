@@ -151,18 +151,31 @@ def _render_reset_form(token: str):
 # 查询订阅状态（完全不变，仍从服务器查）
 # ============================================================
 def check_subscription() -> dict:
-    # 🏎️ 专为 Paddle 审核员开辟的绿色通道
-    current_user = st.session_state.get("current_user")
+    # # 🏎️ 专为 Paddle 审核员开辟的绿色通道
+    # current_user = st.session_state.get("current_user")
+    #
+    # # 🚨 确保 "lucy.n.swift@gmail.com" 是你给审核员注册/登录用的完全一致的账号
+    # if current_user == "lucynswift":
+    #     # 🎯 修正：必须返回和下面格式一模一样的字典，把 subscribed 设为 True
+    #     return {
+    #         "subscribed": True,
+    #         "plan": "Reviewer_VIP",
+    #         "expires_at": "2030-01-01T00:00:00Z"
+    #     }
+    # 🏎️ 绿色通道逻辑
+    user_fixtures = [
+        str(st.session_state.get("current_user", "")).lower().strip(),
+        str(st.session_state.get("username", "")).lower().strip(),
+        str(st.session_state.get("email", "")).lower().strip()
+    ]
+    reviewer_names = ["lucy.n.swift@gmail.com", "lucynswift", ]
 
-    # 🚨 确保 "lucy.n.swift@gmail.com" 是你给审核员注册/登录用的完全一致的账号
-    if current_user == "lucynswift":
-        # 🎯 修正：必须返回和下面格式一模一样的字典，把 subscribed 设为 True
+    if any(name in user_fixtures for name in reviewer_names):
         return {
             "subscribed": True,
             "plan": "Reviewer_VIP",
-            "expires_at": "2030-01-01T00:00:00Z"
+            "expires_at": 1893456000  # 🎯 就是这里！确保是纯数字，不要加引号
         }
-
     # ===========================================================
     token = st.session_state.get("auth_token")
     if not token:
