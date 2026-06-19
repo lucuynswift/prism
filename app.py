@@ -19,6 +19,7 @@ import re
 import time
 import json
 from nltk.stem import WordNetLemmatizer
+from nltk.corpus import wordnet
 import nltk
 import requests
 from io import BytesIO
@@ -30,12 +31,34 @@ import edge_tts
 import tempfile
 from pathlib import Path
 # 🔍 补上这行：定义服务器上存放词汇表（COCA等）的绝对路径
+#WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
+# ==================== 路径配置块 ====================
+BASE_DIR = Path("/opt/prism/logs")
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+
 WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
+# 如果新版词汇宇宙或者 load_wordlist_data 还会用到 SINGLE/COMBINED 分析结果，也应一并统一到自托管路径：
+SINGLE_DIR = Path("/opt/prism/app/vocabulary/single")
+COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
+
+# # ─── ✨ 【新增改动点：全局一次性加载词汇表】 ───
+# if "standard_wordlists" not in st.session_state:
+#     # 只有当全新的 Session 建立、第一次跑这个脚本时，才会触发这一块
+#     with st.spinner("Initializing vocabulary database..."):
+#         try:
+#             # 这里调用的是你本来就定义好的本地加载函数
+#             st.session_state["standard_wordlists"] = load_standard_wordlists()
+#         except Exception as e:
+#             # 增加安全兜底：防止路径配置错误或文件缺失直接导致整个 App 白屏挂掉
+#             st.error(f"⚠️ Vocabulary database loading failed: {e}")
+#             st.session_state["standard_wordlists"] = {}
+# # ────────────────────────────────────────────────
 
 # [改动1] 正式部署新增：认证、数据加载、书单三个本地模块
 from auth import render_auth_sidebar, render_subscription_sidebar, check_subscription
-from data_loader import load_book_from_github
+from data_loader import load_book_from_server
 from book_registry import BOOK_REGISTRY
+
 
 # ------------------- 依存标签英文注释 -------------------
 DEPREL_LABELS = {
@@ -100,8 +123,19 @@ except ImportError:
 #nltk.download('omw-1.4', quiet=True)
 lemmatizer = WordNetLemmatizer()
 
+# 防御性下载：确保在没有语料库的全新服务器环境下自动静默安装，绝不让前台崩溃
+try:
+    # 尝试运行一次还原，如果失败证明缺少语料库
+    lemmatizer.lemmatize("test")
+except LookupError:
+    with st.spinner("Downloading missing NLP components (WordNet)..."):
+        import nltk
+        nltk.download('wordnet', quiet=True)
+        nltk.download('omw-1.4', quiet=True)
+        nltk.download('averaged_perceptron_tagger', quiet=True) # 词性映射需要此组件
+
 # # [改动2] 路径配置：本地路径全部移除，改为 GitHub 动态加载
-# # 书籍数据由 data_loader.load_book_from_github() 从 GitHub 仓库拉取
+# # 书籍数据由 data_loader.load_book_from_server() 从 server拉取
 # # 行为日志存到 /tmp（Streamlit Cloud 唯一可写目录）
 # BASE_DIR  = Path("/tmp/prism")
 # BASE_DIR.mkdir(exist_ok=True)
@@ -192,11 +226,25 @@ def load_standard_wordlists():
             df = pd.DataFrame({'lemma': lemmas, 'order': range(len(lemmas))})
             wordlists[i] = df
     return wordlists
-
+# ─── ✨ 【新增改动点：全局一次性加载词汇表】 ───
+if "standard_wordlists" not in st.session_state:
+    # 只有当全新的 Session 建立、第一次跑这个脚本时，才会触发这一块
+    with st.spinner("Initializing vocabulary database..."):
+        try:
+            # 这里调用的是你本来就定义好的本地加载函数
+            st.session_state["standard_wordlists"] = load_standard_wordlists()
+        except Exception as e:
+            # 增加安全兜底：防止路径配置错误或文件缺失直接导致整个 App 白屏挂掉
+            st.error(f"⚠️ Vocabulary database loading failed: {e}")
+            st.session_state["standard_wordlists"] = {}
+# ────────────────────────────────────────────────
 
 def load_wordlist_data(book_stem, dp_folder):
-    single_path   = SINGLE_DIR   / f"{book_stem}_vocabulary_analysis.csv"
-    combined_path = COMBINED_DIR / f"{book_stem}_vocabulary_analysis.csv"
+    # single_path   = SINGLE_DIR   / f"{book_stem}_vocabulary_analysis.csv"
+    # combined_path = COMBINED_DIR / f"{book_stem}_vocabulary_analysis.csv"
+    # 增加路径存在性校验，防止单机路径未定义引发 NameError
+    single_path = SINGLE_DIR / f"{book_stem}_vocabulary_analysis.csv" if 'SINGLE_DIR' in globals() else None
+    combined_path = COMBINED_DIR / f"{book_stem}_vocabulary_analysis.csv" if 'COMBINED_DIR' in globals() else None
     if single_path.exists():
         wordlist_df = pd.read_csv(single_path)
     elif combined_path.exists():
@@ -206,7 +254,8 @@ def load_wordlist_data(book_stem, dp_folder):
         if freq_path.exists():
             wordlist_df = pd.read_csv(freq_path)
             if 'wordlist' not in wordlist_df.columns:
-                standard_wordlists = load_standard_wordlists()
+                #standard_wordlists = load_standard_wordlists()
+                standard_wordlists = st.session_state.get("standard_wordlists", {})
                 wordlist_mapping = []
                 for _, row in wordlist_df.iterrows():
                     lemma  = str(row.get('lemma', '')).lower()
@@ -221,84 +270,97 @@ def load_wordlist_data(book_stem, dp_folder):
             return pd.DataFrame()
     return wordlist_df
 
+def get_wordnet_pos(word):
+    """将普通的 POS 标签映射到 WordNet 的词性上"""
+    # 使用 nltk 简单的 pos_tag 分类
+    import nltk
+    tag = nltk.pos_tag([word])[0][1][0].upper()
+    tag_dict = {"J": wordnet.ADJ,
+                "N": wordnet.NOUN,
+                "V": wordnet.VERB,
+                "R": wordnet.ADV}
+    return tag_dict.get(tag, wordnet.NOUN) # 找不到则兜底为名词
 
 @st.cache_data(show_spinner=False)
 def cached_lemmatize(word: str) -> str:
-    return lemmatizer.lemmatize(word)
+    # 动态传入该单词在当前语境或独立状态下的词性，实现完美还原（如 went -> go）
+    pos = get_wordnet_pos(word)
+    return lemmatizer.lemmatize(word, pos=pos)
+    #return lemmatizer.lemmatize(word)
 
 
-@st.cache_data(show_spinner="Loading book data…", max_entries=3, ttl=3600)
-def load_book_data(book_stem):
-    dp_folder = find_dp_folder(book_stem)
-    if dp_folder is None:
-        st.error(f"Could not find a matching dependency-analysis folder (searching for '{book_stem}')")
-        if DP_RESULTS_DIR.exists():
-            st.write("Available folders (first 10):")
-            for folder in list(DP_RESULTS_DIR.iterdir())[:10]:
-                if folder.is_dir():
-                    st.write(f"  - {folder.name}")
-        st.stop()
-
-    sentences_path = dp_folder / "sentences.csv"
-    if not sentences_path.exists():
-        st.error(f"未找到 sentences.csv：{sentences_path}")
-        st.stop()
-    sentences_df = pd.read_csv(sentences_path)
-    if "sentence_id" in sentences_df.columns:
-        sentences_df["sentence_id"] = pd.to_numeric(
-            sentences_df["sentence_id"], errors="coerce").astype("Int64")
-
-    dep_path = dp_folder / "dependencies.csv"
-    dep_df   = pd.read_csv(dep_path) if dep_path.exists() else pd.DataFrame()
-    if not dep_df.empty and "sentence_id" in dep_df.columns:
-        dep_df["sentence_id"] = pd.to_numeric(
-            dep_df["sentence_id"], errors="coerce").astype("Int64")
-        dep_df = dep_df[dep_df["sentence_id"].notna()]
-
-    freq_path        = dp_folder / "lemma_frequency.csv"
-    global_freq_dict = {}
-    if freq_path.exists():
-        freq_df          = pd.read_csv(freq_path)
-        global_freq_dict = dict(zip(freq_df['lemma'].str.lower(), freq_df['frequency']))
-
-    metrics_path      = dp_folder / "metrics.csv"
-    most_deprel_path  = dp_folder / "most_common_deprels.csv"
-    metrics_df        = pd.read_csv(metrics_path)     if metrics_path.exists()     else pd.DataFrame()
-    most_deprel_df    = pd.read_csv(most_deprel_path) if most_deprel_path.exists() else pd.DataFrame()
-
-    all_sentence_lemmas = []
-    if "tokenized_sentence" in sentences_df.columns:
-        for tokenized in sentences_df["tokenized_sentence"]:
-            if pd.isna(tokenized):
-                all_sentence_lemmas.append([])
-                continue
-            words  = re.findall(r'\b[a-zA-Z]+\b', str(tokenized).lower())
-            words  = [w for w in words if len(w) > 1 and '-' not in w]
-            lemmas = [cached_lemmatize(w) for w in words]
-            all_sentence_lemmas.append(lemmas)
-    else:
-        all_sentence_lemmas = [[] for _ in range(len(sentences_df))]
-
-    sentence_deltas = [Counter(lemmas) for lemmas in all_sentence_lemmas]
-
-    dep_index = {}
-    if not dep_df.empty and "sentence_id" in dep_df.columns:
-        for sid, group in dep_df.groupby("sentence_id", sort=False):
-            dep_index[sid] = group
-
-    wordlist_df = load_wordlist_data(book_stem, dp_folder)
-
-    return {
-        "sentences":            sentences_df,
-        "all_sentence_lemmas":  all_sentence_lemmas,
-        "sentence_deltas":      sentence_deltas,
-        "global_freq_dict":     global_freq_dict,
-        "dep_df":               dep_df,
-        "dep_index":            dep_index,
-        "metrics":              metrics_df,
-        "most_deprel":          most_deprel_df,
-        "wordlist":             wordlist_df,
-    }
+# @st.cache_data(show_spinner="Loading book data…", max_entries=3, ttl=3600)
+# def load_book_data(book_stem):
+#     dp_folder = find_dp_folder(book_stem)
+#     if dp_folder is None:
+#         st.error(f"Could not find a matching dependency-analysis folder (searching for '{book_stem}')")
+#         if DP_RESULTS_DIR.exists():
+#             st.write("Available folders (first 10):")
+#             for folder in list(DP_RESULTS_DIR.iterdir())[:10]:
+#                 if folder.is_dir():
+#                     st.write(f"  - {folder.name}")
+#         st.stop()
+#
+#     sentences_path = dp_folder / "sentences.csv"
+#     if not sentences_path.exists():
+#         st.error(f"未找到 sentences.csv：{sentences_path}")
+#         st.stop()
+#     sentences_df = pd.read_csv(sentences_path)
+#     if "sentence_id" in sentences_df.columns:
+#         sentences_df["sentence_id"] = pd.to_numeric(
+#             sentences_df["sentence_id"], errors="coerce").astype("Int64")
+#
+#     dep_path = dp_folder / "dependencies.csv"
+#     dep_df   = pd.read_csv(dep_path) if dep_path.exists() else pd.DataFrame()
+#     if not dep_df.empty and "sentence_id" in dep_df.columns:
+#         dep_df["sentence_id"] = pd.to_numeric(
+#             dep_df["sentence_id"], errors="coerce").astype("Int64")
+#         dep_df = dep_df[dep_df["sentence_id"].notna()]
+#
+#     freq_path        = dp_folder / "lemma_frequency.csv"
+#     global_freq_dict = {}
+#     if freq_path.exists():
+#         freq_df          = pd.read_csv(freq_path)
+#         global_freq_dict = dict(zip(freq_df['lemma'].str.lower(), freq_df['frequency']))
+#
+#     metrics_path      = dp_folder / "metrics.csv"
+#     most_deprel_path  = dp_folder / "most_common_deprels.csv"
+#     metrics_df        = pd.read_csv(metrics_path)     if metrics_path.exists()     else pd.DataFrame()
+#     most_deprel_df    = pd.read_csv(most_deprel_path) if most_deprel_path.exists() else pd.DataFrame()
+#
+#     all_sentence_lemmas = []
+#     if "tokenized_sentence" in sentences_df.columns:
+#         for tokenized in sentences_df["tokenized_sentence"]:
+#             if pd.isna(tokenized):
+#                 all_sentence_lemmas.append([])
+#                 continue
+#             words  = re.findall(r'\b[a-zA-Z]+\b', str(tokenized).lower())
+#             words  = [w for w in words if len(w) > 1 and '-' not in w]
+#             lemmas = [cached_lemmatize(w) for w in words]
+#             all_sentence_lemmas.append(lemmas)
+#     else:
+#         all_sentence_lemmas = [[] for _ in range(len(sentences_df))]
+#
+#     sentence_deltas = [Counter(lemmas) for lemmas in all_sentence_lemmas]
+#
+#     dep_index = {}
+#     if not dep_df.empty and "sentence_id" in dep_df.columns:
+#         for sid, group in dep_df.groupby("sentence_id", sort=False):
+#             dep_index[sid] = group
+#
+#     wordlist_df = load_wordlist_data(book_stem, dp_folder)
+#
+#     return {
+#         "sentences":            sentences_df,
+#         "all_sentence_lemmas":  all_sentence_lemmas,
+#         "sentence_deltas":      sentence_deltas,
+#         "global_freq_dict":     global_freq_dict,
+#         "dep_df":               dep_df,
+#         "dep_index":            dep_index,
+#         "metrics":              metrics_df,
+#         "most_deprel":          most_deprel_df,
+#         "wordlist":             wordlist_df,
+#     }
 
 
 def get_word_sentences(lemma, sentences_df, all_sentence_lemmas):
@@ -554,14 +616,53 @@ def compute_dep_distances(sent_deps_df: pd.DataFrame) -> dict:
 
 def get_behavior_log_path(username: str) -> Path:
     return BASE_DIR / f"reading_behavior_{username}.jsonl"
+# ===================================================================
+# 行为数据持久化
+# ===================================================================
 
+# ✨ 新增：支持 Numpy/Pandas 各种数据类型的智能 JSON 编码器
+class NpPandasJsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        # 1. 处理 Numpy 整数 (int64, int32等)
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        # 2. 处理 Numpy 浮点数 (float64, float32等)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        # 3. 处理 Numpy 数组
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        # 4. 处理 Pandas 的可空 Int64/Float64 以及 NAType
+        elif pd.isna(obj): # 自动兼容 pd.NA 和 np.nan，转为 JSON 的 null
+            return None
+        try:
+            # 5. 兜底处理：部分特殊的 Pandas 标量类型
+            if hasattr(obj, 'item'):
+                return obj.item()
+        except Exception:
+            pass
+        return super().default(obj)
+
+# def append_behavior_record(username: str, record: dict):
+#     path = get_behavior_log_path(username)
+#     try:
+#         with open(path, "a", encoding="utf-8") as f:
+#             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+#     except Exception:
+#         pass
 def append_behavior_record(username: str, record: dict):
     path = get_behavior_log_path(username)
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+            # ✨ 核心改动：挂载智能编码器 cls=NpPandasJsonEncoder
+            serialized_str = json.dumps(record, ensure_ascii=False, cls=NpPandasJsonEncoder)
+            f.write(serialized_str + "\n")
+    except Exception as e:
+        # 🛡️ 极其重要的防御性日志：如果在自托管控制台里跑，至少能看到为什么失败
+        import logging
+        logging.error(f"Failed to save behavior record for {username}: {e}")
+        # 如果你想在 Streamlit 页面隐蔽处打印，也可以放开下面这行（可选）：
+        # st.sidebar.error(f"Log Error: {e}")
 
 
 # ===================================================================
@@ -569,10 +670,17 @@ def append_behavior_record(username: str, record: dict):
 # 直接把 dep_map_by_position 里的依存信息 embed 进每个 token，
 # 彻底避免事后用 idx 查找时因 spaCy token id 与 split() 位置错位导致 deps 为空。
 # ===================================================================
+# def build_sentence_tokens(sentence_text: str,
+#                            sentence_deltas: list,
+#                            display_sentence: int,
+#                            dep_map_by_position: dict | None = None) -> list:
+
 def build_sentence_tokens(sentence_text: str,
-                           sentence_deltas: list,
-                           display_sentence: int,
-                           dep_map_by_position: dict | None = None) -> list:
+                          sentence_deltas: list,
+                          display_sentence: int,
+                          dep_map_by_position: dict | None = None,
+                          prefix_counters: list | None = None) -> list:  # 👈 1. 参入传入前缀和
+
     """
     返回 token 列表，每个 token 包含：
       display   : 原始词（含标点）
@@ -583,7 +691,16 @@ def build_sentence_tokens(sentence_text: str,
     """
     if not sentence_text:
         return []
-    freq_before = sum(sentence_deltas[:display_sentence], Counter())
+    # freq_before = sum(sentence_deltas[:display_sentence], Counter())
+    # running_counter = Counter(freq_before)
+    # tokens = []
+
+    # 👈 2. 彻底抛弃旧的 sum 累加，改为 O(1) 查表。若无前缀和（兼容老架构）则兜底
+    if prefix_counters is not None and display_sentence < len(prefix_counters):
+        freq_before = prefix_counters[display_sentence]
+    else:
+        freq_before = sum(sentence_deltas[:display_sentence], Counter())
+
     running_counter = Counter(freq_before)
     tokens = []
     for split_idx, word in enumerate(sentence_text.split()):
@@ -950,7 +1067,7 @@ if not sub["subscribed"] and not in_trial and daily_count >= FREE_DAILY_LIMIT:
 
 # 从 GitHub 加载书籍数据（替代原来的 load_book_data）
 with st.spinner(f"Loading {book_choice}…"):
-    data = load_book_from_github(book_name, book_info["repo"])
+    data = load_book_from_server(book_name, book_info["repo"])
 
 if not data:
     st.error("Failed to load book data. Please try again later.")
@@ -1118,10 +1235,15 @@ with tab1:
 
     # ── [Fix-A] 构建 sentence_tokens，同时传入 dep_map_by_position ──
     sentence_tokens     = build_sentence_tokens(
-        sentence_text,
-        data["sentence_deltas"],
-        display_sentence,
-        dep_map_by_position=dep_map_by_position,   # ← 新增参数
+        # sentence_text,
+        # data["sentence_deltas"],
+        # display_sentence,
+        # dep_map_by_position=dep_map_by_position,   # ← 新增参数
+        sentence_text=current_sentence_text,
+        sentence_deltas=data["sentence_deltas"],
+        display_sentence=display_sentence,
+        dep_map_by_position=dep_map_by_position,
+        prefix_counters=data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
     )
     sentence_word_count = len(sentence_text.split()) if sentence_text else 0
 
@@ -1667,7 +1789,9 @@ with tab3:
 
     counter_for_stats  = (progress["global_counter"]
                           if cumulative_mode else cumulative_counter)
-    standard_wordlists = load_standard_wordlists()
+    #standard_wordlists = load_standard_wordlists()
+    #  改为直接从 Session State 获取，哪怕 rerun 1万次，这里也只是普通的字典字典引用
+    standard_wordlists = st.session_state.get("standard_wordlists", {})
     wordlist_df        = data["wordlist"]
 
     if not wordlist_df.empty and standard_wordlists:

@@ -11,7 +11,7 @@ lemmatizer = WordNetLemmatizer()
 
 
 @st.cache_resource(show_spinner=False)  # 👈 注意：这里用 cache_resource 确保零拷贝
-def load_book_from_github(slug: str, repo_url: str) -> dict:
+def load_book_from_server(slug: str, repo_url: str) -> dict:
     book_dir = Path(repo_url)
 
     # ══════════════════════════════════════════════════════
@@ -72,13 +72,19 @@ def load_book_from_github(slug: str, repo_url: str) -> dict:
         all_sentence_lemmas = [[] for _ in range(len(sentences_df))]
 
     sentence_deltas = [Counter(l) for l in all_sentence_lemmas]
-
+    # [优化核心]：预计算前缀和 (Prefix Sum of Counters)
+    prefix_counters = []
+    current_cum = Counter()
+    for delta in sentence_deltas:
+        prefix_counters.append(current_cum.copy())  # 保存到达当前句之前的累计频次
+        current_cum.update(delta)  # 累加当前句
     # 组装最终结果
     result = {
         "slug": slug,
         "sentences": sentences_df,
         "all_sentence_lemmas": all_sentence_lemmas,
         "sentence_deltas": sentence_deltas,
+        "prefix_counters": prefix_counters,  # 👈 新增这个高价值缓存
         "global_freq_dict": global_freq_dict,
         "dep_df": dep_df,
         "dep_index": dep_index,
