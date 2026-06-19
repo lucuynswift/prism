@@ -155,7 +155,7 @@ def check_subscription() -> dict:
     current_user = st.session_state.get("current_user")
 
     # 🚨 确保 "lucy.n.swift@gmail.com" 是你给审核员注册/登录用的完全一致的账号
-    if current_user == "lucy.n.swift@gmail.com":
+    if current_user == "lucynswift":
         # 🎯 修正：必须返回和下面格式一模一样的字典，把 subscribed 设为 True
         return {
             "subscribed": True,
