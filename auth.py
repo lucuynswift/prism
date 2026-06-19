@@ -151,6 +151,12 @@ def _render_reset_form(token: str):
 # 查询订阅状态（完全不变，仍从服务器查）
 # ============================================================
 def check_subscription() -> dict:
+    # 🏎️ 专为 Paddle 审核员开辟的绿色通道
+    # 假设你在 st.session_state.current_user 里存了当前登录的用户名
+    current_user = st.session_state.get("current_user")
+    if current_user == "lucy.n.swift@gmail.com":
+        return True  # 直接判定为已订阅，跳过后续所有数据库检查
+    #===========================================================
     token = st.session_state.get("auth_token")
     if not token:
         return {"subscribed": False, "plan": None, "expires_at": None}
