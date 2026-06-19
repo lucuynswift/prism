@@ -1239,11 +1239,11 @@ with tab1:
         # data["sentence_deltas"],
         # display_sentence,
         # dep_map_by_position=dep_map_by_position,   # ← 新增参数
-        sentence_text=current_sentence_text,
-        sentence_deltas=data["sentence_deltas"],
-        display_sentence=display_sentence,
-        dep_map_by_position=dep_map_by_position,
-        prefix_counters=data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
+        sentence_text,
+        data["sentence_deltas"],
+        display_sentence,
+        dep_map_by_position,
+        data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
     )
     sentence_word_count = len(sentence_text.split()) if sentence_text else 0
 
