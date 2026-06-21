@@ -1031,6 +1031,11 @@ if "_pending_behavior_save" not in st.session_state:
 # 内部成功登录后，应当自动将 st.session_state.is_logged_in 设为 True，并将账号写入 st.session_state.username
 render_auth_sidebar()
 
+# ── 【修复】同步 auth.py 写入的 current_user → is_logged_in / username ──
+_cu = st.session_state.get("current_user")
+if _cu:
+    st.session_state.is_logged_in = True
+    st.session_state.username = _cu
 
 # ── 3. 全局未登录权限拦截门禁 ──
 if not st.session_state.is_logged_in or st.session_state.username == "guest":

@@ -67,6 +67,8 @@ def render_auth_sidebar():
         if st.sidebar.button("Log out"):
             st.session_state["current_user"] = None
             st.session_state["auth_token"]   = None
+            st.session_state["is_logged_in"] = False  # ← 新增
+            st.session_state["username"] = "guest"  # ← 新增
             st.session_state.pop("_subscription_cache",      None)
             st.session_state.pop("_subscription_cache_time", None)
             st.session_state.pop("sub", None)  # 如果你换成了 sub
