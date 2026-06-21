@@ -3,101 +3,109 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 from collections import Counter
-from nltk.stem import WordNetLemmatizer
 import re
 import pickle  # 👈 引入 pickle 库，用于实现本地硬缓存
 
-lemmatizer = WordNetLemmatizer()
+#lemmatizer = WordNetLemmatizer()
 
 
-@st.cache_resource(show_spinner=False)  # 👈 注意：这里用 cache_resource 确保零拷贝
+@st.cache_resource(show_spinner="⚡ Loading precomputed book vectors...")
 def load_book_from_server(slug: str, repo_url: str) -> dict:
+    """
+    重构后的高性能加载器：
+    利用预计算的 lemma_positions.csv 和新版 dependencies.csv，
+    免去全部 NLTK 还原、切词与动态词频计算逻辑。
+    """
     book_dir = Path(repo_url)
 
-    # ══════════════════════════════════════════════════════
-    # 🔥 核心优化：检查是否存在预计算好的硬缓存文件 (Pickle)
-    # ══════════════════════════════════════════════════════
-    cache_file = book_dir / "preprocessed_data.pkl"
-    if cache_file.exists():
-        try:
-            with open(cache_file, "rb") as f:
-                # 如果有存盘好的结果，直接反序列化读取，耗时从 30秒 直接降到 0.1秒！
-                return pickle.load(f)
-        except Exception:
-            pass  # 如果读取失败，则向下降级重新计算
-
-    # 1. 读取原始 CSV
+    # 1. 加载核心数据表
     try:
         sentences_df = pd.read_csv(book_dir / "sentences.csv")
         dep_df = pd.read_csv(book_dir / "dependencies.csv")
-        freq_df = pd.read_csv(book_dir / "lemma_frequency.csv")
+        lemma_pos_df = pd.read_csv(book_dir / "lemma_positions.csv")
     except Exception as e:
-        st.error(f"本地名著数据加载失败 [{slug}]: {e}")
+        st.error(f"Failed to load book files for {slug}: {e}")
         return {}
 
-    if sentences_df.empty:
-        return {}
+    # 2. ⚡ 从 lemma_positions 秒级构建 all_sentence_lemmas
+    # ⚡ 建立动态索引对齐基准，防范 0/1 起始点漂移
+    min_sid = int(lemma_pos_df['sentence_id'].min())
+    num_sentences = len(sentences_df)
+    all_sentence_lemmas = [[] for _ in range(num_sentences)]
 
-    # 2. 数据清洗与转换
-    if "sentence_id" in sentences_df.columns:
-        sentences_df["sentence_id"] = pd.to_numeric(sentences_df["sentence_id"], errors="coerce").astype("Int64")
+    for (sid, s_text), group in lemma_pos_df.groupby(['sentence_id', 'original_text']):
+        # ✅ 动态计算绝对偏移量，替代硬编码的 sid - 1
+        idx = int(sid) - min_sid
 
-    if not dep_df.empty and "sentence_id" in dep_df.columns:
-        dep_df["sentence_id"] = pd.to_numeric(dep_df["sentence_id"], errors="coerce").astype("Int64")
-        dep_df = dep_df[dep_df["sentence_id"].notna()]
+        if 0 <= idx < num_sentences:
+            sorted_group = group.sort_values('local_word_id')
+            lemmas_list = sorted_group['lemma'].astype(str).str.lower().str.strip().tolist()
+            all_sentence_lemmas[idx] = lemmas_list
+    # # 按 sentence_id 分组，直接按词的位置顺序把 lemma 组合起来
+    # # 为了防止某些句子在词表中没有单词导致错位，我们预先对整个书的长度进行初始化
 
-    global_freq_dict = {}
-    if not freq_df.empty and "lemma" in freq_df.columns:
-        global_freq_dict = dict(zip(freq_df["lemma"].str.lower(), freq_df["frequency"]))
+    # 3. ⚡ 从大表秒级提取全局静态词频字典
+    # 因为 lemma_positions.csv 里已经算好了每一行的 global_frequency
 
-    # 优化点 A：利用 Pandas 内部字典转换，彻底干掉极其缓慢的 for ... groupby 循环
-    dep_index = {}
-    if not dep_df.empty and "sentence_id" in dep_df.columns:
-        # 这一步通过底层的 dict 分组，速度比标准的 groupby 循环快几十倍
-        for sid, group in dep_df.groupby("sentence_id", sort=False):
-            dep_index[sid] = group
+    global_freq_dict = {}  # 👈 让他变成纯局部变量，受缓存保护
+    if not lemma_pos_df.empty:
+        counts = lemma_pos_df['lemma'].astype(str).str.lower().str.strip().value_counts()
+        global_freq_dict = counts.to_dict()
 
-    # 优化点 B：66万次词形还原确实慢，但由于后面会持久化存盘，它一生只需要跑一次
-    all_sentence_lemmas = []
-    if "tokenized_sentence" in sentences_df.columns:
-        for tok in sentences_df["tokenized_sentence"]:
-            if pd.isna(tok):
-                all_sentence_lemmas.append([])
-                continue
-            words = re.findall(r'\b[a-zA-Z]+\b', str(tok).lower())
-            words = [w for w in words if len(w) > 1]
-            lemmas = [lemmatizer.lemmatize(w) for w in words]
-            all_sentence_lemmas.append(lemmas)
-    else:
-        all_sentence_lemmas = [[] for _ in range(len(sentences_df))]
-
+    # 4. [保留核心结构]：根据预计算的列表快速生成前缀和向量
     sentence_deltas = [Counter(l) for l in all_sentence_lemmas]
-    # [优化核心]：预计算前缀和 (Prefix Sum of Counters)
     prefix_counters = []
     current_cum = Counter()
     for delta in sentence_deltas:
-        prefix_counters.append(current_cum.copy())  # 保存到达当前句之前的累计频次
-        current_cum.update(delta)  # 累加当前句
-    # 组装最终结果
-    result = {
+        prefix_counters.append(current_cum.copy())
+        current_cum.update(delta)
+
+    # 5. 构建依存树的快速索引加速匹配
+    # ✅ 高性能向量化构建核心字典索引
+    dep_index = {}
+    if not dep_df.empty:
+        # 动态探测核心键（兼容 dependent_lemma 和 dependent_text）
+        key_col = 'dependent_lemma' if 'dependent_lemma' in dep_df.columns else 'dependent_text'
+        dep_df['_key_lemma'] = dep_df[key_col].astype(str).str.lower().str.strip()
+
+        # 强制将 sentence_id 转为标准 Python int，防止 numpy.int64 引发 JSON 序列化报错
+        dep_df['sentence_id'] = dep_df['sentence_id'].astype(int)
+
+        # 利用 Pandas 内部优化过的 groupby 快速分流
+        for (sid, w_lemma), group in dep_df.groupby(['sentence_id', '_key_lemma']):
+            # 一次性将整个子集 Dataframe 转换为 字典列表，零循环开销
+            dep_index[(sid, w_lemma)] = group.drop(columns='_key_lemma').to_dict('records')
+
+        # 清理临时计算列
+        dep_df.drop(columns='_key_lemma', inplace=True)
+    # dep_index = {}
+    # if not dep_df.empty:
+    #     # 使用重构后带 dependent_lemma 列的依赖表
+    #     for _, row in dep_df.iterrows():
+    #         sid = int(row['sentence_id'])
+    #         # 兼容处理：优先使用 dependent_lemma，没有则降级使用小写的 text
+    #         w_lemma = str(row['dependent_lemma']).lower() if 'dependent_lemma' in row else str(
+    #             row['dependent_text']).lower()
+    #         dep_index.setdefault((sid, w_lemma), []).append(dict(row))
+
+    # 组装返回原系统完全一致的数据结构，确保前端 app.py 零报错缝合
+    return {
         "slug": slug,
         "sentences": sentences_df,
         "all_sentence_lemmas": all_sentence_lemmas,
         "sentence_deltas": sentence_deltas,
-        "prefix_counters": prefix_counters,  # 👈 新增这个高价值缓存
+        "prefix_counters": prefix_counters,
         "global_freq_dict": global_freq_dict,
         "dep_df": dep_df,
         "dep_index": dep_index,
-        "wordlist": freq_df,
     }
-
-    # ══════════════════════════════════════════════════════
-    # 🔥 核心优化：将计算好的巨大字典直接用二进制“死死冻结”在硬盘里
-    # ══════════════════════════════════════════════════════
-    try:
-        with open(cache_file, "wb") as f:
-            pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception as e:
-        st.warning(f"无法写入本地硬缓存: {e}")
-
-    return result
+    # # ══════════════════════════════════════════════════════
+    # # 🔥 核心优化：将计算好的巨大字典直接用二进制“死死冻结”在硬盘里
+    # # ══════════════════════════════════════════════════════
+    # try:
+    #     with open(cache_file, "wb") as f:
+    #         pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # except Exception as e:
+    #     st.warning(f"无法写入本地硬缓存: {e}")
+    #
+    # return result

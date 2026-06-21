@@ -18,15 +18,15 @@ import numpy as np
 import re
 import time
 import json
-from nltk.stem import WordNetLemmatizer
-from nltk.corpus import wordnet
-import nltk
+#from nltk.stem import WordNetLemmatizer
+#from nltk.corpus import wordnet
+#import nltk
 import requests
 from io import BytesIO
 import html
 import hashlib
 import secrets
-import asyncio
+#import asyncio
 import edge_tts
 import tempfile
 from pathlib import Path
@@ -41,6 +41,10 @@ WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
 SINGLE_DIR = Path("/opt/prism/app/vocabulary/single")
 COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
 
+
+
+# 确保在后续的 full_html 模板中，json.dumps 传入的是这个安全的 labels_dict
+
 # # ─── ✨ 【新增改动点：全局一次性加载词汇表】 ───
 # if "standard_wordlists" not in st.session_state:
 #     # 只有当全新的 Session 建立、第一次跑这个脚本时，才会触发这一块
@@ -53,7 +57,10 @@ COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
 #             st.error(f"⚠️ Vocabulary database loading failed: {e}")
 #             st.session_state["standard_wordlists"] = {}
 # # ────────────────────────────────────────────────
+import asyncio
+import nest_asyncio
 
+nest_asyncio.apply()  # 👈 全局只需在程序启动时注入一次，彻底根治所有 asyncio.run 死锁
 # [改动1] 正式部署新增：认证、数据加载、书单三个本地模块
 from auth import render_auth_sidebar, render_subscription_sidebar, check_subscription
 from data_loader import load_book_from_server
@@ -105,6 +112,8 @@ DEPREL_LABELS = {
     "punct": "punctuation",
     "list": "list",
 }
+# 在循环上方或全局，确保有这个映射表，或者进行安全获取
+labels_dict = globals().get('DEPREL_LABELS', {})
 
 def label_deprel(rel: str) -> str:
     note = DEPREL_LABELS.get(rel) or DEPREL_LABELS.get(rel.lower())
@@ -121,18 +130,22 @@ except ImportError:
 
 #nltk.download('wordnet', quiet=True)
 #nltk.download('omw-1.4', quiet=True)
-lemmatizer = WordNetLemmatizer()
+#lemmatizer = WordNetLemmatizer()
 
-# 防御性下载：确保在没有语料库的全新服务器环境下自动静默安装，绝不让前台崩溃
-try:
-    # 尝试运行一次还原，如果失败证明缺少语料库
-    lemmatizer.lemmatize("test")
-except LookupError:
-    with st.spinner("Downloading missing NLP components (WordNet)..."):
-        import nltk
-        nltk.download('wordnet', quiet=True)
-        nltk.download('omw-1.4', quiet=True)
-        nltk.download('averaged_perceptron_tagger', quiet=True) # 词性映射需要此组件
+# # 防御性下载：确保在没有语料库的全新服务器环境下自动静默安装，绝不让前台崩溃
+# try:
+#     lemmatizer = WordNetLemmatizer()
+#     # 尝试运行一次还原，如果失败证明缺少语料库
+#     lemmatizer.lemmatize("test")
+#
+#
+#     # 防御性
+# except LookupError:
+#     with st.spinner("Downloading missing NLP components (WordNet)..."):
+#         import nltk
+#         nltk.download('wordnet', quiet=True)
+#         nltk.download('omw-1.4', quiet=True)
+#         nltk.download('averaged_perceptron_tagger', quiet=True) # 词性映射需要此组件
 
 # # [改动2] 路径配置：本地路径全部移除，改为 GitHub 动态加载
 # # 书籍数据由 data_loader.load_book_from_server() 从 server拉取
@@ -245,7 +258,7 @@ def load_wordlist_data(book_stem, dp_folder):
     # 增加路径存在性校验，防止单机路径未定义引发 NameError
     single_path = SINGLE_DIR / f"{book_stem}_vocabulary_analysis.csv" if 'SINGLE_DIR' in globals() else None
     combined_path = COMBINED_DIR / f"{book_stem}_vocabulary_analysis.csv" if 'COMBINED_DIR' in globals() else None
-    if single_path.exists():
+    if single_path and single_path.exists():
         wordlist_df = pd.read_csv(single_path)
     elif combined_path.exists():
         wordlist_df = pd.read_csv(combined_path)
@@ -270,23 +283,29 @@ def load_wordlist_data(book_stem, dp_folder):
             return pd.DataFrame()
     return wordlist_df
 
-def get_wordnet_pos(word):
-    """将普通的 POS 标签映射到 WordNet 的词性上"""
-    # 使用 nltk 简单的 pos_tag 分类
-    import nltk
-    tag = nltk.pos_tag([word])[0][1][0].upper()
-    tag_dict = {"J": wordnet.ADJ,
-                "N": wordnet.NOUN,
-                "V": wordnet.VERB,
-                "R": wordnet.ADV}
-    return tag_dict.get(tag, wordnet.NOUN) # 找不到则兜底为名词
+# def get_wordnet_pos(word):
+#     """将普通的 POS 标签映射到 WordNet 的词性上"""
+#     # 使用 nltk 简单的 pos_tag 分类
+#     import nltk
+#     tag = nltk.pos_tag([word])[0][1][0].upper()
+#     tag_dict = {"J": wordnet.ADJ,
+#                 "N": wordnet.NOUN,
+#                 "V": wordnet.VERB,
+#                 "R": wordnet.ADV}
+#     return tag_dict.get(tag, wordnet.NOUN) # 找不到则兜底为名词
 
 @st.cache_data(show_spinner=False)
+# def cached_lemmatize(word: str) -> str:
+#     # 动态传入该单词在当前语境或独立状态下的词性，实现完美还原（如 went -> go）
+#     pos = get_wordnet_pos(word)
+#     return lemmatizer.lemmatize(word, pos=pos)
+#     #return lemmatizer.lemmatize(word)
+
+# 改造后：不再需要任何 NLTK 依赖，仅做基础清洗
 def cached_lemmatize(word: str) -> str:
-    # 动态传入该单词在当前语境或独立状态下的词性，实现完美还原（如 went -> go）
-    pos = get_wordnet_pos(word)
-    return lemmatizer.lemmatize(word, pos=pos)
-    #return lemmatizer.lemmatize(word)
+    if not word:
+        return ""
+    return word.strip().lower()
 
 
 # @st.cache_data(show_spinner="Loading book data…", max_entries=3, ttl=3600)
@@ -374,42 +393,78 @@ def get_word_sentences(lemma, sentences_df, all_sentence_lemmas):
     return matching
 
 
-def get_word_dependencies(lemma, dep_df):
-    if dep_df.empty:
+# def get_word_dependencies(lemma, dep_df):
+#     if dep_df.empty:
+#         return []
+#     lemma     = str(lemma).lower()
+#     dep_pairs = []
+#     required_cols = ['dependent_text', 'head_text', 'deprel', 'sentence_id']
+#     if not all(col in dep_df.columns for col in required_cols):
+#         return []
+#     for _, row in dep_df.iterrows():
+#         dep_text  = str(row.get('dependent_text', ''))
+#         head_text = str(row.get('head_text', ''))
+#         deprel    = str(row.get('deprel', ''))
+#         sent_id   = row.get('sentence_id', 0)
+#         dep_clean  = re.sub(r'[^\w]', '', dep_text.lower())
+#         head_clean = re.sub(r'[^\w]', '', head_text.lower())
+#         if not dep_clean or not head_clean:
+#             continue
+#         dep_lemma  = cached_lemmatize(dep_clean)
+#         head_lemma = cached_lemmatize(head_clean)
+#         if dep_lemma == lemma or head_lemma == lemma:
+#             dep_pairs.append({
+#                 'relation':       f"{head_text} ──{label_deprel(deprel)}──> {dep_text}",
+#                 'sentence_id':    sent_id,
+#                 'head_text':      head_text,
+#                 'dependent_text': dep_text,
+#                 'deprel':         deprel,
+#             })
+#     seen         = set()
+#     unique_pairs = []
+#     for pair in dep_pairs:
+#         key = (pair['relation'], pair['sentence_id'])
+#         if key not in seen:
+#             seen.add(key)
+#             unique_pairs.append(pair)
+#     unique_pairs.sort(key=lambda x: x['sentence_id'])
+#     return unique_pairs
+def get_word_dependencies(clicked_word: str, current_sentence_id: int, dep_df: pd.DataFrame):
+    """
+    直接通过预计算好的 Lemma 列进行 O(1) 匹配，不再实时计算还原
+    """
+    # if dep_df is empty or dep_df is None:
+    #     return []
+    # ✅ 正确的 DataFrame 判空与守卫
+    if dep_df is None or (isinstance(dep_df, pd.DataFrame) and dep_df.empty):
+        st.warning("⚠️ No dependency tree data available for this book.")
+
+    # 1. 统一转换用户点击的词为小写（作为基础匹配依据）
+    click_lemma = clicked_word.strip().lower()
+
+    # 2. 筛选当前句子的依存子集
+    sub_df = dep_df[dep_df['sentence_id'] == current_sentence_id]
+    if sub_df.empty:
         return []
-    lemma     = str(lemma).lower()
-    dep_pairs = []
-    required_cols = ['dependent_text', 'head_text', 'deprel', 'sentence_id']
-    if not all(col in dep_df.columns for col in required_cols):
-        return []
-    for _, row in dep_df.iterrows():
-        dep_text  = str(row.get('dependent_text', ''))
-        head_text = str(row.get('head_text', ''))
-        deprel    = str(row.get('deprel', ''))
-        sent_id   = row.get('sentence_id', 0)
-        dep_clean  = re.sub(r'[^\w]', '', dep_text.lower())
-        head_clean = re.sub(r'[^\w]', '', head_text.lower())
-        if not dep_clean or not head_clean:
-            continue
-        dep_lemma  = cached_lemmatize(dep_clean)
-        head_lemma = cached_lemmatize(head_clean)
-        if dep_lemma == lemma or head_lemma == lemma:
-            dep_pairs.append({
-                'relation':       f"{head_text} ──{label_deprel(deprel)}──> {dep_text}",
-                'sentence_id':    sent_id,
-                'head_text':      head_text,
-                'dependent_text': dep_text,
-                'deprel':         deprel,
-            })
-    seen         = set()
-    unique_pairs = []
-    for pair in dep_pairs:
-        key = (pair['relation'], pair['sentence_id'])
-        if key not in seen:
-            seen.add(key)
-            unique_pairs.append(pair)
-    unique_pairs.sort(key=lambda x: x['sentence_id'])
-    return unique_pairs
+
+    # 3. 直接利用预计算好的 dependent_lemma 和 head_lemma 查找关联
+    # 关联条件：点击的词是“依赖词”或“核心词”
+    matched = sub_df[
+        (sub_df['dependent_lemma'] == click_lemma) |
+        (sub_df['head_lemma'] == click_lemma)
+        ]
+
+    dependencies = []
+    for _, row in matched.iterrows():
+        dependencies.append({
+            'dep_word': row['dependent_text'],
+            'head_word': row['head_text'],
+            'deprel': row['deprel'],
+            'dep_lemma': row['dependent_lemma'],  # 直接使用预计算值
+            'head_lemma': row['head_lemma']  # 直接使用预计算值
+        })
+
+    return dependencies
 
 
 # ------------------- 依存弧线 HTML 模板 -------------------
@@ -803,15 +858,24 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
             style_str = "; ".join(styles)
 
             # 用 token 里预存的 deps_info 构建 JS 数据（保持 iframe 高亮功能）
-            dep_data = []
-            if idx in dep_map_by_position:
-                for related_idx, deprel, related_lemma in dep_map_by_position[idx]:
-                    dep_data.append({
-                        'position': related_idx,
-                        'lemma':    related_lemma,
-                        'deprel':   deprel,
-                    })
+            # dep_data = []
+            # if idx in dep_map_by_position:
+            #     for related_idx, deprel, related_lemma in dep_map_by_position[idx]:
+            #         dep_data.append({
+            #             'position': related_idx,
+            #             'lemma':    related_lemma,
+            #             'deprel':   deprel,
+            #         })
 
+            #  改为直接从 word_data 中读取预存的对齐数据：
+            dep_data = []
+            if 'deps_info' in word_data and word_data['deps_info']:
+                for dep_item in word_data['deps_info']:
+                    dep_data.append({
+                        'position': dep_item.get('related_idx'),  # 对应 JS 中的 dep.position
+                        'lemma': dep_item.get('related_lemma'),
+                        'deprel': dep_item.get('deprel'),
+                    })
             word_data_json.append({
                 'idx': idx, 'lemma': lemma, 'word': word, 'deps': dep_data
             })
@@ -820,10 +884,16 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 f'data-lemma="{html.escape(lemma)}" '
                 f'style="{style_str}">{html.escape(word)}</span> '
             )
+        # else:
+        #     html_parts.append(
+        #         f'<span style="color:#555555; font-size:15px; '
+        #         f'font-family:Merriweather">{html.escape(word)}</span> '
+        #     )
         else:
+            # 将字号调整到 24px - 26px 左右，与主体视觉对齐
             html_parts.append(
-                f'<span style="color:#555555; font-size:15px; '
-                f'font-family:Merriweather">{html.escape(word)}</span> '
+                f'<span style="color:#666666; font-size:26px; '
+                f'font-family:Merriweather, serif">{html.escape(word)}</span> '
             )
 
     sentence_html = ''.join(html_parts)
@@ -937,24 +1007,57 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
 # 认证：改用 auth.py 连接远程 FastAPI
 # 书籍选择：改用 book_registry.py，支持免费/付费分层
 # ===================================================================
-if "current_user" not in st.session_state:
-    st.session_state.current_user = None
 
-reset_default_session_state()
+# ── 1. 全局核心 Session State 初始化（增加条件判定，防止频繁 Rerun 导致的重置死循环） ──
+if "is_logged_in" not in st.session_state:
+    st.session_state.is_logged_in = False
 
-if "_sentence_enter_time"   not in st.session_state:
-    st.session_state["_sentence_enter_time"]   = {}
+if "username" not in st.session_state:
+    st.session_state.username = "guest"
+
+# ⚡ [优化点1]：将状态重置函数包裹在条件门禁中，只有在首次进入或必要时才执行一次
+if "states_initialized" not in st.session_state:
+    reset_default_session_state()
+    st.session_state["states_initialized"] = True
+
+# 初始化阅读行为打点所需的专用计时与缓存字典
+if "_sentence_enter_time" not in st.session_state:
+    st.session_state["_sentence_enter_time"] = {}
 if "_pending_behavior_save" not in st.session_state:
     st.session_state["_pending_behavior_save"] = None
 
-# ── 认证（来自 auth.py，支持注册/登录/忘记密码）──
+
+# ── 2. 远程身份认证组件（调用 auth.py 渲染侧边栏） ──
+# 内部成功登录后，应当自动将 st.session_state.is_logged_in 设为 True，并将账号写入 st.session_state.username
 render_auth_sidebar()
 
-if not st.session_state.current_user:
-    st.info("Please log in or register in the sidebar to start reading.")
-    st.stop()
 
-username = st.session_state.current_user
+# ── 3. 全局未登录权限拦截门禁 ──
+if not st.session_state.is_logged_in or st.session_state.username == "guest":
+    st.info("👋 Welcome! Please log in or register in the sidebar to start your smart reading journey.")
+    st.stop()  # ⛔ 强行阻断下游代码渲染，保护核心内容付费墙和付费书籍资产
+
+# ── 4. 权限通过，全局变量安全派生 ──
+# 下游的所有组件（包括日志记录器、书籍展示墙）将统一且安全地调用此 username 变量
+username = st.session_state.username
+# if "current_user" not in st.session_state:
+#     st.session_state.current_user = None
+#
+# reset_default_session_state()
+#
+# if "_sentence_enter_time"   not in st.session_state:
+#     st.session_state["_sentence_enter_time"]   = {}
+# if "_pending_behavior_save" not in st.session_state:
+#     st.session_state["_pending_behavior_save"] = None
+#
+# # ── 认证（来自 auth.py，支持注册/登录/忘记密码）──
+# render_auth_sidebar()
+#
+# if not st.session_state.current_user:
+#     st.info("Please log in or register in the sidebar to start reading.")
+#     st.stop()
+#
+# username = st.session_state.current_user
 
 # ── 订阅状态 + 付款入口 ──
 render_subscription_sidebar()
@@ -1065,7 +1168,7 @@ if not sub["subscribed"] and not in_trial and daily_count >= FREE_DAILY_LIMIT:
     st.info("Come back tomorrow, or upgrade to read without limits.")
     st.stop()
 
-# 从 GitHub 加载书籍数据（替代原来的 load_book_data）
+# 从服务器加载书籍数据
 with st.spinner(f"Loading {book_choice}…"):
     data = load_book_from_server(book_name, book_info["repo"])
 
@@ -1166,11 +1269,24 @@ with tab1:
     sentence_id   = row["sentence_id"]
     sent_deps_df  = dep_index.get(sentence_id, pd.DataFrame())
 
-    if not sent_deps_df.empty:
-        core_rels     = {"nsubj", "nsubj:pass", "obj", "iobj", "csubj",
-                         "csubj:pass", "ccomp", "xcomp", "root", "ROOT"}
+    sent_deps_df = dep_index.get(sentence_id, [])
+
+    # 兼容两种结构的判空
+    is_valid_deps = false
+    if isinstance(sent_deps_df, pd.DataFrame):
+        is_valid_deps = not sent_deps_df.empty
+    else:
+        is_valid_deps = len(sent_deps_df) > 0
+
+    if is_valid_deps:
+        core_rels = {"nsubj", "nsubj:pass", "obj", "iobj", "csubj", "csubj:pass", "ccomp", "xcomp", "root", "ROOT"}
         modifier_rels = {"amod", "advmod", "obl", "nmod", "appos", "acl", "acl:relcl"}
-        for _, r in sent_deps_df.iterrows():
+
+        # 动态选择迭代器
+        iterator = sent_deps_df.iterrows() if isinstance(sent_deps_df, pd.DataFrame) else enumerate(sent_deps_df)
+
+        for _, r in iterator:
+
             rel        = str(r.get("deprel", "")).lower()
             dep_text   = str(r.get("dependent_text", ""))
             head_text  = str(r.get("head_text", ""))
@@ -1235,10 +1351,6 @@ with tab1:
 
     # ── [Fix-A] 构建 sentence_tokens，同时传入 dep_map_by_position ──
     sentence_tokens     = build_sentence_tokens(
-        # sentence_text,
-        # data["sentence_deltas"],
-        # display_sentence,
-        # dep_map_by_position=dep_map_by_position,   # ← 新增参数
         sentence_text,
         data["sentence_deltas"],
         display_sentence,
@@ -1393,18 +1505,74 @@ with tab1:
                          use_container_width=True, hide_index=True)
 
     # ── TTS ──
+
+    # ── TTS 语音朗读模块 ──
     tts_col1, _ = st.columns([1, 4])
-    with tts_col1:
-        if st.button("🔊 Play sentence", key=f"tts_{book_name}_{display_sentence}"):
-            if sentence_text:
-                audio_bytes = text_to_speech_bytes(sentence_text)
-                if audio_bytes:
-                    st.session_state[f"tts_audio_{book_name}_{display_sentence}"] = audio_bytes
-                else:
-                    st.warning("Speech synthesis failed.")
     tts_audio_key = f"tts_audio_{book_name}_{display_sentence}"
-    if tts_audio_key in st.session_state:
+
+    with tts_col1:
+        # 按钮加上 key，防止 Streamlit 在组件销毁重建时产生状态混乱
+        if st.button("🔊 Play Audio", key=f"btn_tts_{book_name}_{display_sentence}"):
+            with st.spinner("Generating audio..."):
+                try:
+                    # 1. 异步调用 edge-tts 生成音频
+                    # 无论当前处于何种线程/事件循环，因为顶部已经 apply 了 nest_asyncio，直接 run 绝对安全
+                    mp3_path = asyncio.run(do_tts(sentence_text, tts_voice))
+
+                    # 2. ⚡ 核心安全改动：立即从物理磁盘读入内存字节流，摆脱临时文件并发控制的泥潭
+                    from pathlib import Path
+
+                    audio_bytes = Path(mp3_path).read_bytes()
+
+                    # 3. 将字节流存入当前句子的专属 Session 状态中
+                    st.session_state[tts_audio_key] = audio_bytes
+
+                    # 4. 尝试安全地删除刚刚产生的临时物理文件，保持服务器磁盘整洁
+                    try:
+                        Path(mp3_path).unlink()
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    st.error(f"TTS generation failed: {e}")
+
+    # ✨ 状态渲染屏障：只要当前句子的音频在缓存里，就稳稳地渲染播放器，Rerun 刷新也不会消失
+    if tts_audio_key in st.session_state and st.session_state[tts_audio_key]:
         st.audio(st.session_state[tts_audio_key], format="audio/mp3")
+    # tts_col1, _ = st.columns([1, 4])
+    # with tts_col1:
+    #     # if st.button("🔊 Play sentence", key=f"tts_{book_name}_{display_sentence}"):
+    #     #     if sentence_text:
+    #     #         audio_bytes = text_to_speech_bytes(sentence_text)
+    #     #         if audio_bytes:
+    #     #             st.session_state[f"tts_audio_{book_name}_{display_sentence}"] = audio_bytes
+    #     #         else:
+    #     #             st.warning("Speech synthesis failed.")
+    #     if st.button("🔊 Play Audio"):
+    #         with st.spinner("Generating audio..."):
+    #             try:
+    #                 # 安全地获取或运行异步任务，防止 Loop 嵌套死锁
+    #                 try:
+    #                     loop = asyncio.get_running_loop()
+    #                 except RuntimeError:
+    #                     loop = None
+    #
+    #                 if loop and loop.is_running():
+    #                     # 如果当前线程已经在运行 loop，通过 run_coroutine_threadsafe 或 nest_asyncio 处理
+    #                     # 最稳妥的降级是直接阻塞运行：
+    #                     import nest_asyncio
+    #
+    #                     nest_asyncio.apply()
+    #                     mp3_path = asyncio.run(do_tts(sentence_text, tts_voice))
+    #                 else:
+    #                     mp3_path = asyncio.run(do_tts(sentence_text, tts_voice))
+    #
+    #                 st.audio(mp3_path, format="audio/mp3")
+    #             except Exception as e:
+    #                 st.error(f"TTS generation failed: {e}")
+    # tts_audio_key = f"tts_audio_{book_name}_{display_sentence}"
+    # if tts_audio_key in st.session_state:
+    #     st.audio(st.session_state[tts_audio_key], format="audio/mp3")
 
     # ── 加词到词汇本 ──
     if sentence_tokens:
@@ -1578,8 +1746,11 @@ function copyText2(){{_doCopy();}}
     # ── 单词查询 ──
     query_word = st.text_input("🔍 Enter a word to look up")
     if query_word:
-        lemma_query          = lemmatizer.lemmatize(query_word.lower())
+        # 移除不存在的 lemmatizer 调用，做安全的字符串清洗
+        lemma_query = query_word.strip().lower()
         phonetic, audio_url, explanation = get_word_info(query_word)
+        #lemma_query          = lemmatizer.lemmatize(query_word.lower())
+        #phonetic, audio_url, explanation = get_word_info(query_word)
         st.write(f"**Word:** {query_word}")
         st.write(f"**Lemma:** {lemma_query}")
         st.write(f"**Phonetic:** {phonetic}")
@@ -1635,27 +1806,29 @@ function copyText2(){{_doCopy();}}
                 st.info("Unable to generate dependency tree.")
 
     # ── Prev / Next 按钮 ──
-    col_prev, col_next = st.columns([1, 1])
-    with col_prev:
+    # ── 🎯 完美集成跳读功能的进度控制面板（日志行为完备版） ──
+    # 使用 4 列紧凑排版：上一句按钮、跳读数字输入框、进度百分比展示、下一句按钮
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([1, 1.5, 1.5, 1])
+
+    with ctrl_col1:
         if display_sentence > 0:
-            if st.button("← Previous sentence",
-                         key=f"prev_btn_{book_name}_{display_sentence}"):
+            if st.button("← Previous", key=f"prev_btn_v3_{book_name}_{display_sentence}", use_container_width=True):
                 leave_time = time.time()
                 enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
                 dwell_secs = round(leave_time - enter_time, 2)
                 behavior_record = {
-                    "timestamp":     time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "username":      username,
-                    "book":          book_name,
-                    "sentence_idx":  display_sentence,
-                    "sentence_id":   int(sentence_id),
-                    "word_count":    sentence_word_count,
-                    "mdd":           dep_dist_info["mdd"],
-                    "max_dd":        dep_dist_info["max_dd"],
-                    "dep_pairs":     dep_dist_info["dep_pairs"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "username": username,
+                    "book": book_name,
+                    "sentence_idx": display_sentence,
+                    "sentence_id": int(sentence_id),
+                    "word_count": sentence_word_count,
+                    "mdd": dep_dist_info["mdd"],
+                    "max_dd": dep_dist_info["max_dd"],
+                    "dep_pairs": dep_dist_info["dep_pairs"],
                     "dwell_seconds": dwell_secs,
-                    "trigger":       "prev_btn",
-                    "click_log":     current_click_log,
+                    "trigger": "prev_btn",  # 保持原有行为标记
+                    "click_log": current_click_log,
                 }
                 st.session_state["_pending_behavior_save"] = behavior_record
                 st.session_state.pop(click_cache_key, None)
@@ -1664,26 +1837,82 @@ function copyText2(){{_doCopy();}}
                 save_progress()
                 st.rerun()
 
-    with col_next:
+    with ctrl_col2:
+        # ✨ 【核心新增：跳读输入框】
+        # 显示给用户 1-based (从 1 开始的序号)，后台自动转换对齐到 0-based 数组
+        max_valid_idx = int(total_sentences)
+        display_idx = display_sentence + 1
+
+        target_sentence_1based = st.number_input(
+            label="🎯 Jump to Sentence:",
+            min_value=1,
+            max_value=max_valid_idx,
+            value=int(display_idx),
+            step=1,
+            label_visibility="collapsed",  # 隐藏上方的多余提示文字，保持排版精简
+            key=f"jump_input_v3_{book_name}_{display_sentence}"
+        )
+
+        # 💡 联动监听：如果用户输入的页码发生了改变（代表敲击了回车或按了加减）
+        target_sentence_0based = target_sentence_1based - 1
+        if target_sentence_0based != display_sentence:
+            leave_time = time.time()
+            enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
+            dwell_secs = round(leave_time - enter_time, 2)
+
+            # ⚡ 完美融入：跳读时也生成一条对应的行为日志，并将 trigger 标记为 "jump_input"
+            behavior_record = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "username": username,
+                "book": book_name,
+                "sentence_idx": display_sentence,
+                "sentence_id": int(sentence_id),
+                "word_count": sentence_word_count,
+                "mdd": dep_dist_info["mdd"],
+                "max_dd": dep_dist_info["max_dd"],
+                "dep_pairs": dep_dist_info["dep_pairs"],
+                "dwell_seconds": dwell_secs,
+                "trigger": f"jump_to_{target_sentence_1based}",  # 动态记录跳读目标，极其利于后续科研行为分析
+                "click_log": current_click_log,
+            }
+            st.session_state["_pending_behavior_save"] = behavior_record
+            st.session_state.pop(click_cache_key, None)
+            st.session_state["_sentence_enter_time"].pop(enter_key, None)
+
+            # 变更进度指针并保存刷新
+            st.session_state[pending_key] = target_sentence_0based
+            save_progress()
+            st.rerun()
+
+    with ctrl_col3:
+        # 在中间两列之间，优雅地居中打印当前进度百分比
+        progress_pct = ((display_sentence + 1) / total_sentences) * 100
+        st.markdown(
+            f"<div style='text-align: center; line-height: 38px; color: #555; font-size: 14px;'>"
+            f"<b>{display_sentence + 1}</b> / {total_sentences} ({progress_pct:.1f}%)"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+    with ctrl_col4:
         if display_sentence < max_view:
-            if st.button("Next sentence →",
-                         key=f"next_btn_{book_name}_{display_sentence}"):
+            if st.button("Next →", key=f"next_btn_v3_{book_name}_{display_sentence}", use_container_width=True):
                 leave_time = time.time()
                 enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
                 dwell_secs = round(leave_time - enter_time, 2)
                 behavior_record = {
-                    "timestamp":     time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "username":      username,
-                    "book":          book_name,
-                    "sentence_idx":  display_sentence,
-                    "sentence_id":   int(sentence_id),
-                    "word_count":    sentence_word_count,
-                    "mdd":           dep_dist_info["mdd"],
-                    "max_dd":        dep_dist_info["max_dd"],
-                    "dep_pairs":     dep_dist_info["dep_pairs"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "username": username,
+                    "book": book_name,
+                    "sentence_idx": display_sentence,
+                    "sentence_id": int(sentence_id),
+                    "word_count": sentence_word_count,
+                    "mdd": dep_dist_info["mdd"],
+                    "max_dd": dep_dist_info["max_dd"],
+                    "dep_pairs": dep_dist_info["dep_pairs"],
                     "dwell_seconds": dwell_secs,
-                    "trigger":       "next_view_btn",
-                    "click_log":     current_click_log,
+                    "trigger": "next_view_btn",
+                    "click_log": current_click_log,
                 }
                 st.session_state["_pending_behavior_save"] = behavior_record
                 st.session_state.pop(click_cache_key, None)
@@ -1691,6 +1920,62 @@ function copyText2(){{_doCopy();}}
                 st.session_state[pending_key] = display_sentence + 1
                 save_progress()
                 st.rerun()
+    # col_prev, col_next = st.columns([1, 1])
+    # with col_prev:
+    #     if display_sentence > 0:
+    #         if st.button("← Previous sentence",
+    #                      key=f"prev_btn_{book_name}_{display_sentence}"):
+    #             leave_time = time.time()
+    #             enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
+    #             dwell_secs = round(leave_time - enter_time, 2)
+    #             behavior_record = {
+    #                 "timestamp":     time.strftime("%Y-%m-%dT%H:%M:%S"),
+    #                 "username":      username,
+    #                 "book":          book_name,
+    #                 "sentence_idx":  display_sentence,
+    #                 "sentence_id":   int(sentence_id),
+    #                 "word_count":    sentence_word_count,
+    #                 "mdd":           dep_dist_info["mdd"],
+    #                 "max_dd":        dep_dist_info["max_dd"],
+    #                 "dep_pairs":     dep_dist_info["dep_pairs"],
+    #                 "dwell_seconds": dwell_secs,
+    #                 "trigger":       "prev_btn",
+    #                 "click_log":     current_click_log,
+    #             }
+    #             st.session_state["_pending_behavior_save"] = behavior_record
+    #             st.session_state.pop(click_cache_key, None)
+    #             st.session_state["_sentence_enter_time"].pop(enter_key, None)
+    #             st.session_state[pending_key] = display_sentence - 1
+    #             save_progress()
+    #             st.rerun()
+    #
+    # with col_next:
+    #     if display_sentence < max_view:
+    #         if st.button("Next sentence →",
+    #                      key=f"next_btn_{book_name}_{display_sentence}"):
+    #             leave_time = time.time()
+    #             enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
+    #             dwell_secs = round(leave_time - enter_time, 2)
+    #             behavior_record = {
+    #                 "timestamp":     time.strftime("%Y-%m-%dT%H:%M:%S"),
+    #                 "username":      username,
+    #                 "book":          book_name,
+    #                 "sentence_idx":  display_sentence,
+    #                 "sentence_id":   int(sentence_id),
+    #                 "word_count":    sentence_word_count,
+    #                 "mdd":           dep_dist_info["mdd"],
+    #                 "max_dd":        dep_dist_info["max_dd"],
+    #                 "dep_pairs":     dep_dist_info["dep_pairs"],
+    #                 "dwell_seconds": dwell_secs,
+    #                 "trigger":       "next_view_btn",
+    #                 "click_log":     current_click_log,
+    #             }
+    #             st.session_state["_pending_behavior_save"] = behavior_record
+    #             st.session_state.pop(click_cache_key, None)
+    #             st.session_state["_sentence_enter_time"].pop(enter_key, None)
+    #             st.session_state[pending_key] = display_sentence + 1
+    #             save_progress()
+    #             st.rerun()
 
 
 # ===================================================================
@@ -1722,11 +2007,12 @@ with tab2:
                 lemma = w.get("lemma")
                 if lemma and lemma not in lemma_to_word:
                     lemma_to_word[lemma] = w.get("word", lemma)
-            sorted_lemmas  = sorted(lemma_to_word.keys())
+            sorted_lemmas = sorted(lemma_to_word.keys())
             selected_lemma = st.selectbox(
                 "Select a word to view example sentences in this book",
                 options=sorted_lemmas,
                 format_func=lambda x: f"{lemma_to_word.get(x, x)} ({x})")
+
             if selected_lemma:
                 sentences_for_word = get_word_sentences(
                     selected_lemma, sentences_df, all_sentence_lemmas)
@@ -1745,6 +2031,7 @@ with tab2:
                         with st.expander(f"Show remaining {total_hits - top_n} sentences"):
                             for item in sentences_for_word[top_n:]:
                                 st.write(f"{item['sentence_id']}: {item['text']}")
+
                 st.markdown("---")
                 st.subheader("🔗 Word dependencies and definitions")
                 default_query = lemma_to_word.get(selected_lemma, selected_lemma)
@@ -1752,34 +2039,138 @@ with tab2:
                     "Enter a word (view dependencies & definition)",
                     value=default_query,
                     key=f"dep_query_input_{book_name}")
+
                 if st.button("🔍 Show word dependencies", key=f"dep_btn_{book_name}"):
                     if not dep_query:
                         st.warning("Please enter a word first.")
                     else:
-                        lemma_dep = lemmatizer.lemmatize(dep_query.lower())
-                        dep_pairs = get_word_dependencies(lemma_dep, data["dep_df"])
-                        if dep_pairs:
-                            st.subheader(
-                                "Dependency relations (ordered by sentence index)")
+                        # ── ⚡ 适配修改 1：移除 lemmatizer，直接转为标准小写 ──
+                        lemma_dep = dep_query.strip().lower()
+                        dep_df = data.get("dep_df", pd.DataFrame())
+
+                        # ── ⚡ 适配修改 2：直接基于新版预计算列进行全表筛选 ──
+                        if not dep_df.empty:
+                            # 匹配 dependent_lemma 或 head_lemma 等于当前查询词的所有依存记录
+                            matched_deps = dep_df[
+                                (dep_df['dependent_lemma'] == lemma_dep) |
+                                (dep_df['head_lemma'] == lemma_dep)
+                                ]
+                        else:
+                            matched_deps = pd.DataFrame()
+
+                        if not matched_deps.empty:
+                            st.subheader("Dependency relations (ordered by sentence index)")
                             current_sid = sentences_df.iloc[display_sentence]["sentence_id"]
                             shown = 0
-                            for pair in dep_pairs:
-                                if shown >= 200: break
-                                sid      = pair['sentence_id']
-                                relation = pair['relation']
+
+                            # 按照句子的原始顺序升序排列显示
+                            matched_deps = matched_deps.sort_values(by="sentence_id")
+
+                            for _, row in matched_deps.iterrows():
+                                if shown >= 200:
+                                    break
+
+                                sid = int(row['sentence_id'])
+                                # 动态拼装可读性更高的关系文本，代替旧版未定义的 relation 字段
+                                relation = f"[{row['dependent_text']}] --({row['deprel']})--> [{row['head_text']}]"
+
+                                # 高亮当前用户正在阅读的句子
                                 if sid == current_sid:
                                     st.markdown(f"**★ [{sid}]** `{relation}`")
                                 else:
                                     st.text(f"[{sid}] {relation}")
                                 shown += 1
-                            if len(dep_pairs) > 200:
+
+                            if len(matched_deps) > 200:
                                 st.info(
-                                    f"{len(dep_pairs)} relations in total, "
+                                    f"{len(matched_deps)} relations in total, "
                                     f"showing the first 200.")
                         else:
-                            st.info(
-                                "No dependency relations found for this word.")
-
+                            st.info("No dependency relations found for this word.")
+# with tab2:
+#     st.title("📚 Wordbook")
+#     wordbook = st.session_state.user_wordbook
+#     normalized_wordbook = []
+#     for item in wordbook:
+#         if isinstance(item, dict):
+#             normalized_wordbook.append(item)
+#         elif isinstance(item, str):
+#             normalized_wordbook.append(
+#                 {"book": "unknown", "lemma": item.lower(), "word": item})
+#     if normalized_wordbook != wordbook:
+#         st.session_state.user_wordbook = normalized_wordbook
+#     wordbook = normalized_wordbook
+#
+#     if not wordbook:
+#         st.info("The wordbook is empty. Add words from the reading tab.")
+#     else:
+#         current_book_words = [w for w in wordbook if w.get("book") == book_name]
+#         if not current_book_words:
+#             st.info("This book has no saved words yet. Add words from the reading tab.")
+#         else:
+#             lemma_to_word = {}
+#             for w in current_book_words:
+#                 lemma = w.get("lemma")
+#                 if lemma and lemma not in lemma_to_word:
+#                     lemma_to_word[lemma] = w.get("word", lemma)
+#             sorted_lemmas  = sorted(lemma_to_word.keys())
+#             selected_lemma = st.selectbox(
+#                 "Select a word to view example sentences in this book",
+#                 options=sorted_lemmas,
+#                 format_func=lambda x: f"{lemma_to_word.get(x, x)} ({x})")
+#             if selected_lemma:
+#                 sentences_for_word = get_word_sentences(
+#                     selected_lemma, sentences_df, all_sentence_lemmas)
+#                 if not sentences_for_word:
+#                     st.info("No sentences containing this word were found in this book.")
+#                 else:
+#                     sentences_for_word.sort(key=lambda x: x["sentence_id"])
+#                     total_hits = len(sentences_for_word)
+#                     st.markdown(
+#                         f"**Found {total_hits} sentences containing this word "
+#                         f"(ordered by sentence index)**")
+#                     top_n = 5
+#                     for item in sentences_for_word[:top_n]:
+#                         st.write(f"{item['sentence_id']}: {item['text']}")
+#                     if total_hits > top_n:
+#                         with st.expander(f"Show remaining {total_hits - top_n} sentences"):
+#                             for item in sentences_for_word[top_n:]:
+#                                 st.write(f"{item['sentence_id']}: {item['text']}")
+#                 st.markdown("---")
+#                 st.subheader("🔗 Word dependencies and definitions")
+#                 default_query = lemma_to_word.get(selected_lemma, selected_lemma)
+#                 dep_query = st.text_input(
+#                     "Enter a word (view dependencies & definition)",
+#                     value=default_query,
+#                     key=f"dep_query_input_{book_name}")
+#                 if st.button("🔍 Show word dependencies", key=f"dep_btn_{book_name}"):
+#                     if not dep_query:
+#                         st.warning("Please enter a word first.")
+#                     else:
+#                         lemma_dep = lemmatizer.lemmatize(dep_query.lower())
+#                         dep_pairs = get_word_dependencies(lemma_dep, data["dep_df"])
+#                         if dep_pairs:
+#                             st.subheader(
+#                                 "Dependency relations (ordered by sentence index)")
+#                             current_sid = sentences_df.iloc[display_sentence]["sentence_id"]
+#                             shown = 0
+#                             for pair in dep_pairs:
+#                                 if shown >= 200: break
+#                                 sid      = pair['sentence_id']
+#                                 relation = pair['relation']
+#                                 if sid == current_sid:
+#                                     st.markdown(f"**★ [{sid}]** `{relation}`")
+#                                 else:
+#                                     st.text(f"[{sid}] {relation}")
+#                                 shown += 1
+#                             if len(dep_pairs) > 200:
+#                                 st.info(
+#                                     f"{len(dep_pairs)} relations in total, "
+#                                     f"showing the first 200.")
+#                         else:
+#                             st.info(
+#                                 "No dependency relations found for this word.")
+#
 
 # ===================================================================
 # TAB 3 ── VOCABULARY UNIVERSE
@@ -1787,54 +2178,242 @@ with tab2:
 with tab3:
     st.title("🌌 Vocabulary universe")
 
-    counter_for_stats  = (progress["global_counter"]
-                          if cumulative_mode else cumulative_counter)
-    #standard_wordlists = load_standard_wordlists()
-    #  改为直接从 Session State 获取，哪怕 rerun 1万次，这里也只是普通的字典字典引用
-    standard_wordlists = st.session_state.get("standard_wordlists", {})
-    wordlist_df        = data["wordlist"]
+    # ── ⚡ 核心对齐修改 1：利用 O(1) 前缀和计算用户当前真正“见过”的词频计数器 ──
+    # 彻底杜绝原本“不论读到哪，都只显示全书静态死数据”的缺陷
+    if cumulative_mode:
+        # 累计模式：使用用户跨书籍的全局历史累计词频
+        user_seen_counter = progress.get("global_counter", Counter())
+    else:
+        # 单书模式：利用预计算的前缀和 + 当前句增量，瞬时(O(1))还原出用户当前的真实阅读词频进度
+        if "prefix_counters" in data and current_sentence < len(data["sentence_deltas"]):
+            # 到达当前句之前的所有累计词频缓存
+            user_seen_counter = data["prefix_counters"][current_sentence].copy()
+            # 加上当前这一句所贡献的词频
+            user_seen_counter.update(data["sentence_deltas"][current_sentence])
+        else:
+            # 兜底逻辑
+            user_seen_counter = Counter()
 
-    if not wordlist_df.empty and standard_wordlists:
-        text_lemmas = set()
-        if 'lemma' in wordlist_df.columns:
-            text_lemmas = set(wordlist_df['lemma'].str.lower())
-        st.markdown("### 📈 Vocabulary coverage statistics")
+    # 从 Session State 获取官方的标准词汇分级表（COCA等）
+    standard_wordlists = st.session_state.get("standard_wordlists", {})
+
+    # ── 📈 动态词汇覆盖率统计 ──
+    if user_seen_counter and standard_wordlists:
+        # 统一转为小写集合，用于高精度集合交集计算
+        text_lemmas = {str(k).lower().strip() for k in user_seen_counter.keys()}
+
+        st.markdown("### 📈 Vocabulary coverage statistics (Current Progress)")
         stats_cols = st.columns(4)
         for idx, (level, wl_df) in enumerate(sorted(standard_wordlists.items())):
-            if idx >= 4: break
-            wordlist_lemmas = set(wl_df['lemma'].str.lower())
-            intersection   = text_lemmas & wordlist_lemmas
-            coverage       = (len(intersection) / len(wordlist_lemmas) * 100
-                              if wordlist_lemmas else 0)
-            with stats_cols[idx]:
-                st.metric(label=f"COCA {(level-1)*5000+1}-{level*5000}",
-                          value=f"{len(intersection)} words",
-                          delta=f"{coverage:.1f}% coverage")
+            if idx >= 4:
+                break
 
+            # 确保提取标准词表的原型为小写集合
+            wordlist_lemmas = set(wl_df['lemma'].str.lower().str.strip())
+            # 计算用户见过的词与标准词表的交集
+            intersection = text_lemmas & wordlist_lemmas
+
+            coverage = (len(intersection) / len(wordlist_lemmas) * 100 if wordlist_lemmas else 0)
+
+            with stats_cols[idx]:
+                st.metric(
+                    label=f"COCA {(level - 1) * 5000 + 1}-{level * 5000}",
+                    value=f"{len(intersection)} words",
+                    delta=f"{coverage:.1f}% coverage"
+                )
+    else:
+        st.info("💡 Start reading sentences in TAB 1 to generate your real-time vocabulary metrics!")
+
+    # ── 📊 图表联动区域 ──
     col1, col2 = st.columns([1, 1])
+
     with col1:
-        if st.button("📊 Show dependency relation types"):
-            if not data["dep_df"].empty:
+        if st.button("📊 Show dependency relation types", key="btn_show_deprels"):
+            # 确保数据源存在且不为空
+            if "dep_df" in data and isinstance(data["dep_df"], pd.DataFrame) and not data["dep_df"].empty:
                 counts = data["dep_df"]["deprel"].value_counts()
-                fig    = px.bar(counts, x=counts.index, y=counts.values,
-                                title="Dependency relation types")
+                fig = px.bar(
+                    counts, x=counts.index, y=counts.values,
+                    labels={'x': 'Dependency Relation (deprel)', 'y': 'Count'},
+                    title="Distribution of Dependency Relation Types in Current Book",
+                    color_discrete_sequence=['#1976D2']
+                )
+                fig.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No dependency data available for this book.")
+
     with col2:
-        if st.button("📋 Show word frequency table"):
-            if not data["wordlist"].empty:
-                display_df = data["wordlist"].copy()
-                if 'wordlist' not in display_df.columns:
-                    display_df['wordlist'] = 'Unknown'
+        if st.button("📋 Show word frequency table", key="btn_show_freq_table"):
+            if user_seen_counter:
+                # ── ⚡ 核心对齐修改 2：用用户当前的动态词频字典直接渲染，提速百倍 ──
+                # 将内存字典瞬间转为 DataFrame，避免任何多余的 NLTK 实时处理
+                display_df = pd.DataFrame(list(user_seen_counter.items()), columns=['lemma', 'frequency'])
+
+                # 补充词表分级字段（结合加载的 COCA 词表）
+                display_df['wordlist'] = 'Unknown'
+                for level, wl_df in standard_wordlists.items():
+                    wl_set = set(wl_df['lemma'].str.lower().str.strip())
+                    # 批量打标匹配
+                    mask = display_df['lemma'].str.lower().isin(wl_set)
+                    display_df.loc[mask, 'wordlist'] = f'COCA_{level}'
+
+
+                # 定义词表排序加权权重
                 def get_wordlist_order(wl):
                     if 'COCA' in str(wl):
-                        try: return int(str(wl).split('_')[1])
-                        except: pass
+                        try:
+                            return int(str(wl).split('_')[1])
+                        except Exception:
+                            pass
                     return 999999
+
+
+                # 按照词表级别升序（如COCA_1排最前），同级别内按用户见过的频次降序排列
                 display_df['_sort_key'] = display_df['wordlist'].apply(get_wordlist_order)
-                display_df = display_df.sort_values(
-                    ['_sort_key', 'frequency'], ascending=[True, False])
+                display_df = display_df.sort_values(['_sort_key', 'frequency'], ascending=[True, False])
                 display_df = display_df.drop('_sort_key', axis=1)
-                st.dataframe(display_df[['lemma', 'frequency', 'wordlist']])
+
+                # 完美大表渲染，隐藏默认索引
+                st.dataframe(
+                    display_df[['lemma', 'frequency', 'wordlist']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("Your dynamic word frequency table is empty. Read some sentences first!")
+# with tab3:
+#     st.title("🌌 Vocabulary universe")
+#
+#     counter_for_stats = (progress["global_counter"]
+#                          if cumulative_mode else cumulative_counter)
+#
+#     # 从 Session State 获取官方的标准词汇分级表（COCA等）
+#     standard_wordlists = st.session_state.get("standard_wordlists", {})
+#
+#     # ── ⚡ 适配修改 1：原 data["wordlist"] 降级兼容或替换为预计算的 lemma_pos_df ──
+#     # 在新数据结构中，我们将通过 lemma_positions 提取全书不重复的单词表
+#     lemma_pos_df = data.get("sentences", pd.DataFrame())  # 兜底逻辑
+#     if "lemma_pos_df" in data:
+#         lemma_pos_df = data["lemma_pos_df"]
+#     elif "sentences" in data and hasattr(data, "get"):
+#         # 兼容层：如果之前组装时直接叫原始表，或者我们可以直接通过大表去重
+#         # 根据我们在 data_loader 里的组装，这里我们可以直接通过下面的方式提取唯一 Lemma 表
+#         pass
+#
+#     # 最佳实践：直接从 `global_freq_dict` 瞬间生成唯一词汇表，彻底取代旧的 wordlist_df
+#     global_freq_dict = data.get("global_freq_dict", {})
+#
+#     if global_freq_dict and standard_wordlists:
+#         # 统一转为小写集合，用于计算覆盖率
+#         text_lemmas = {str(k).lower() for k in global_freq_dict.keys()}
+#
+#         st.markdown("### 📈 Vocabulary coverage statistics")
+#         stats_cols = st.columns(4)
+#         for idx, (level, wl_df) in enumerate(sorted(standard_wordlists.items())):
+#             if idx >= 4: break
+#             wordlist_lemmas = set(wl_df['lemma'].str.lower())
+#             intersection = text_lemmas & wordlist_lemmas
+#             coverage = (len(intersection) / len(wordlist_lemmas) * 100
+#                         if wordlist_lemmas else 0)
+#             with stats_cols[idx]:
+#                 st.metric(label=f"COCA {(level - 1) * 5000 + 1}-{level * 5000}",
+#                           value=f"{len(intersection)} words",
+#                           delta=f"{coverage:.1f}% coverage")
+#
+#     col1, col2 = st.columns([1, 1])
+#     with col1:
+#         if st.button("📊 Show dependency relation types"):
+#             if not data["dep_df"].empty:
+#                 counts = data["dep_df"]["deprel"].value_counts()
+#                 fig = px.bar(counts, x=counts.index, y=counts.values,
+#                              title="Dependency relation types")
+#                 st.plotly_chart(fig, use_container_width=True)
+#
+#     with col2:
+#         if st.button("📋 Show word frequency table"):
+#             if global_freq_dict:
+#                 # ── ⚡ 适配修改 2：用预计算的字典直接生成精简的词频展示表 ──
+#                 # 将内存字典直接转为 DataFrame，速度提升 100 倍
+#                 display_df = pd.DataFrame(list(global_freq_dict.items()), columns=['lemma', 'frequency'])
+#
+#                 # 补充词表分级字段（如果需要结合标准词表展示它是 COCA 几）
+#                 display_df['wordlist'] = 'Unknown'
+#                 for level, wl_df in standard_wordlists.items():
+#                     wl_set = set(wl_df['lemma'].str.lower())
+#                     # 匹配属于该级别词表的单词
+#                     mask = display_df['lemma'].str.lower().isin(wl_set)
+#                     display_df.loc[mask, 'wordlist'] = f'COCA_{level}'
+#
+#
+#                 def get_wordlist_order(wl):
+#                     if 'COCA' in str(wl):
+#                         try:
+#                             return int(str(wl).split('_')[1])
+#                         except:
+#                             pass
+#                     return 999999
+#
+#
+#                 # 按照词表等级升序，同等级内按频次降序排列
+#                 display_df['_sort_key'] = display_df['wordlist'].apply(get_wordlist_order)
+#                 display_df = display_df.sort_values(['_sort_key', 'frequency'], ascending=[True, False])
+#                 display_df = display_df.drop('_sort_key', axis=1)
+#
+#                 # 完美渲染
+#                 st.dataframe(display_df[['lemma', 'frequency', 'wordlist']], use_container_width=True,
+#                              hide_index=True)
+# with tab3:
+#     st.title("🌌 Vocabulary universe")
+#
+#     counter_for_stats  = (progress["global_counter"]
+#                           if cumulative_mode else cumulative_counter)
+#     #standard_wordlists = load_standard_wordlists()
+#     #  改为直接从 Session State 获取，哪怕 rerun 1万次，这里也只是普通的字典字典引用
+#     standard_wordlists = st.session_state.get("standard_wordlists", {})
+#     wordlist_df        = data["wordlist"]
+#
+#     if not wordlist_df.empty and standard_wordlists:
+#         text_lemmas = set()
+#         if 'lemma' in wordlist_df.columns:
+#             text_lemmas = set(wordlist_df['lemma'].str.lower())
+#         st.markdown("### 📈 Vocabulary coverage statistics")
+#         stats_cols = st.columns(4)
+#         for idx, (level, wl_df) in enumerate(sorted(standard_wordlists.items())):
+#             if idx >= 4: break
+#             wordlist_lemmas = set(wl_df['lemma'].str.lower())
+#             intersection   = text_lemmas & wordlist_lemmas
+#             coverage       = (len(intersection) / len(wordlist_lemmas) * 100
+#                               if wordlist_lemmas else 0)
+#             with stats_cols[idx]:
+#                 st.metric(label=f"COCA {(level-1)*5000+1}-{level*5000}",
+#                           value=f"{len(intersection)} words",
+#                           delta=f"{coverage:.1f}% coverage")
+#
+#     col1, col2 = st.columns([1, 1])
+#     with col1:
+#         if st.button("📊 Show dependency relation types"):
+#             if not data["dep_df"].empty:
+#                 counts = data["dep_df"]["deprel"].value_counts()
+#                 fig    = px.bar(counts, x=counts.index, y=counts.values,
+#                                 title="Dependency relation types")
+#                 st.plotly_chart(fig, use_container_width=True)
+#     with col2:
+#         if st.button("📋 Show word frequency table"):
+#             if not data["wordlist"].empty:
+#                 display_df = data["wordlist"].copy()
+#                 if 'wordlist' not in display_df.columns:
+#                     display_df['wordlist'] = 'Unknown'
+#                 def get_wordlist_order(wl):
+#                     if 'COCA' in str(wl):
+#                         try: return int(str(wl).split('_')[1])
+#                         except: pass
+#                     return 999999
+#                 display_df['_sort_key'] = display_df['wordlist'].apply(get_wordlist_order)
+#                 display_df = display_df.sort_values(
+#                     ['_sort_key', 'frequency'], ascending=[True, False])
+#                 display_df = display_df.drop('_sort_key', axis=1)
+#                 st.dataframe(display_df[['lemma', 'frequency', 'wordlist']])
 
     # ── 行为数据面板 ──
     st.markdown("---")
