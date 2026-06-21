@@ -219,11 +219,23 @@ def render_subscription_sidebar():
 
     if sub["subscribed"]:
         import datetime
-        exp = (datetime.datetime.fromtimestamp(
-                   sub["expires_at"]).strftime("%Y-%m-%d")
-               if sub.get("expires_at") else "—")
+        # exp = (datetime.datetime.fromtimestamp(
+        #            sub["expires_at"]).strftime("%Y-%m-%d")
+        #        if sub.get("expires_at") else "—")
+        # plan_label = sub.get("plan", "").capitalize()
+        # st.sidebar.success(f"✅ **{plan_label} plan**\n\nExpires: {exp}")
+        exp = "—"
+        if sub.get("expires_at"):
+            try:
+                # 如果是数字或数字字符串，转成整数解析
+                exp = datetime.datetime.fromtimestamp(int(sub["expires_at"])).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                # 如果本来就是格式化好的日期字符串(如 "2026-06-19")，直接拿来用
+                exp = str(sub["expires_at"])
+
         plan_label = sub.get("plan", "").capitalize()
         st.sidebar.success(f"✅ **{plan_label} plan**\n\nExpires: {exp}")
+
 
         # 已订阅用户：显示联系支持入口
         with st.sidebar.expander("Manage subscription"):
@@ -300,8 +312,19 @@ def _render_license_input():
             plan      = data.get("plan", "")
             expires   = data.get("expires_at", "")
             import datetime
-            exp_str = (datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
-                       if expires else "—")
+            # exp_str = (datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
+            #            if expires else "—")
+            # st.sidebar.success(
+            #     f"✅ Activated! **{plan.capitalize()} plan** until {exp_str}")
+            exp_str = "—"
+            if expires:
+                try:
+                    # 如果是纯数字或数字字符串，转成整数解析
+                    exp_str = datetime.datetime.fromtimestamp(int(expires)).strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    # 如果本来就是格式化好的日期字符串(如 "2026-06-19")，直接当文本用
+                    exp_str = str(expires)
+
             st.sidebar.success(
                 f"✅ Activated! **{plan.capitalize()} plan** until {exp_str}")
             # 清除订阅缓存，让下次查询拿到最新状态
