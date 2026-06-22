@@ -9,24 +9,18 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
-import pandas as pd
-#from pathlib import Path
+# pandas 已完全移除，改用原生 Python + SQLite
 from collections import Counter
 import plotly.express as px
 import plotly.graph_objects as go
-import numpy as np
 import re
 import time
 import json
-#from nltk.stem import WordNetLemmatizer
-#from nltk.corpus import wordnet
-#import nltk
 import requests
 from io import BytesIO
 import html
 import hashlib
 import secrets
-#import asyncio
 import edge_tts
 import tempfile
 from pathlib import Path
@@ -65,6 +59,10 @@ nest_asyncio.apply()  # 👈 全局只需在程序启动时注入一次，彻底
 from auth import render_auth_sidebar, render_subscription_sidebar, check_subscription
 from data_loader import load_book_from_server
 from book_registry import BOOK_REGISTRY
+from db import init_db, insert_record, query_records
+
+# 启动时初始化 SQLite 数据库（幂等，已存在则跳过）
+init_db()
 
 
 # ------------------- 依存标签英文注释 -------------------
@@ -226,6 +224,10 @@ def find_dp_folder(book_stem):
 
 @st.cache_data
 def load_standard_wordlists():
+    """
+    加载 COCA 词表，返回 {level: set(lemmas)} 而非 DataFrame。
+    使用 set 可以做 O(1) 成员检查，比 DataFrame 快很多。
+    """
     wordlists = {}
     if not WORDLISTS_DIR.exists():
         return wordlists
@@ -235,9 +237,8 @@ def load_standard_wordlists():
         wordlist_path = WORDLISTS_DIR / file_name
         if wordlist_path.exists():
             with open(wordlist_path, 'r', encoding='utf-8') as f:
-                lemmas = [line.strip().lower() for line in f if line.strip()]
-            df = pd.DataFrame({'lemma': lemmas, 'order': range(len(lemmas))})
-            wordlists[i] = df
+                lemmas = {line.strip().lower() for line in f if line.strip()}
+            wordlists[i] = lemmas
     return wordlists
 # ─── ✨ 【新增改动点：全局一次性加载词汇表】 ───
 if "standard_wordlists" not in st.session_state:
@@ -253,35 +254,40 @@ if "standard_wordlists" not in st.session_state:
 # ────────────────────────────────────────────────
 
 def load_wordlist_data(book_stem, dp_folder):
-    # single_path   = SINGLE_DIR   / f"{book_stem}_vocabulary_analysis.csv"
-    # combined_path = COMBINED_DIR / f"{book_stem}_vocabulary_analysis.csv"
-    # 增加路径存在性校验，防止单机路径未定义引发 NameError
-    single_path = SINGLE_DIR / f"{book_stem}_vocabulary_analysis.csv" if 'SINGLE_DIR' in globals() else None
+    """
+    加载词汇分析文件，返回 list of dict。
+    完全移除 pandas，改用标准库 csv。
+    """
+    import csv as _csv
+    def _read(path):
+        with open(path, newline='', encoding='utf-8') as f:
+            return list(_csv.DictReader(f))
+
+    single_path   = SINGLE_DIR   / f"{book_stem}_vocabulary_analysis.csv" if 'SINGLE_DIR'   in globals() else None
     combined_path = COMBINED_DIR / f"{book_stem}_vocabulary_analysis.csv" if 'COMBINED_DIR' in globals() else None
+
     if single_path and single_path.exists():
-        wordlist_df = pd.read_csv(single_path)
-    elif combined_path.exists():
-        wordlist_df = pd.read_csv(combined_path)
+        rows = _read(single_path)
+    elif combined_path and combined_path.exists():
+        rows = _read(combined_path)
     else:
         freq_path = dp_folder / "lemma_frequency.csv"
         if freq_path.exists():
-            wordlist_df = pd.read_csv(freq_path)
-            if 'wordlist' not in wordlist_df.columns:
-                #standard_wordlists = load_standard_wordlists()
+            rows = _read(freq_path)
+            if rows and 'wordlist' not in rows[0]:
                 standard_wordlists = st.session_state.get("standard_wordlists", {})
-                wordlist_mapping = []
-                for _, row in wordlist_df.iterrows():
+                for row in rows:
                     lemma  = str(row.get('lemma', '')).lower()
                     source = '未知'
-                    for level, wl_df in standard_wordlists.items():
-                        if lemma in wl_df['lemma'].values:
+                    for level, wl_set in standard_wordlists.items():
+                        if lemma in wl_set:
                             source = f'COCA_{level * 5000}'
                             break
-                    wordlist_mapping.append(source)
-                wordlist_df['wordlist'] = wordlist_mapping
+                    row['wordlist'] = source
         else:
-            return pd.DataFrame()
-    return wordlist_df
+            return []
+    return rows
+
 
 # def get_wordnet_pos(word):
 #     """将普通的 POS 标签映射到 WordNet 的词性上"""
@@ -382,15 +388,18 @@ def cached_lemmatize(word: str) -> str:
 #     }
 
 
-def get_word_sentences(lemma, sentences_df, all_sentence_lemmas):
+def get_word_sentences(lemma, sentences: list, all_sentence_lemmas: list) -> list:
+    """接受 list of dict，不再使用 DataFrame.iloc。"""
     matching = []
     for idx, sent_lemmas in enumerate(all_sentence_lemmas):
-        if lemma in sent_lemmas:
+        if lemma in sent_lemmas and idx < len(sentences):
+            row = sentences[idx]
             matching.append({
-                "sentence_id": sentences_df.iloc[idx]["sentence_id"],
-                "text":        sentences_df.iloc[idx].get("tokenized_sentence", ""),
+                "sentence_id": row.get("sentence_id", idx),
+                "text":        row.get("tokenized_sentence", ""),
             })
     return matching
+
 
 
 # def get_word_dependencies(lemma, dep_df):
@@ -429,43 +438,32 @@ def get_word_sentences(lemma, sentences_df, all_sentence_lemmas):
 #             unique_pairs.append(pair)
 #     unique_pairs.sort(key=lambda x: x['sentence_id'])
 #     return unique_pairs
-def get_word_dependencies(clicked_word: str, current_sentence_id: int, dep_df: pd.DataFrame):
+def get_word_dependencies(clicked_word: str, current_sentence_id: int, dep_rows: list) -> list:
     """
-    直接通过预计算好的 Lemma 列进行 O(1) 匹配，不再实时计算还原
+    从 dep_rows（list of dict）中查找与 clicked_word 相关的依存关系。
+    不再依赖 pandas DataFrame。
     """
-    # if dep_df is empty or dep_df is None:
-    #     return []
-    # ✅ 正确的 DataFrame 判空与守卫
-    if dep_df is None or (isinstance(dep_df, pd.DataFrame) and dep_df.empty):
-        st.warning("⚠️ No dependency tree data available for this book.")
-
-    # 1. 统一转换用户点击的词为小写（作为基础匹配依据）
-    click_lemma = clicked_word.strip().lower()
-
-    # 2. 筛选当前句子的依存子集
-    sub_df = dep_df[dep_df['sentence_id'] == current_sentence_id]
-    if sub_df.empty:
+    if not dep_rows:
         return []
-
-    # 3. 直接利用预计算好的 dependent_lemma 和 head_lemma 查找关联
-    # 关联条件：点击的词是“依赖词”或“核心词”
-    matched = sub_df[
-        (sub_df['dependent_lemma'] == click_lemma) |
-        (sub_df['head_lemma'] == click_lemma)
-        ]
-
-    dependencies = []
-    for _, row in matched.iterrows():
-        dependencies.append({
-            'dep_word': row['dependent_text'],
-            'head_word': row['head_text'],
-            'deprel': row['deprel'],
-            'dep_lemma': row['dependent_lemma'],  # 直接使用预计算值
-            'head_lemma': row['head_lemma']  # 直接使用预计算值
-        })
-
-    return dependencies
-
+    click_lemma = clicked_word.strip().lower()
+    results = []
+    for r in dep_rows:
+        try:
+            if int(r['sentence_id']) != current_sentence_id:
+                continue
+        except (ValueError, KeyError):
+            continue
+        dep_lemma  = r.get('dependent_lemma', r.get('dependent_text', '')).lower()
+        head_lemma = r.get('head_lemma',      r.get('head_text',      '')).lower()
+        if dep_lemma == click_lemma or head_lemma == click_lemma:
+            results.append({
+                'dep_word':   r.get('dependent_text', ''),
+                'head_word':  r.get('head_text', ''),
+                'deprel':     r.get('deprel', ''),
+                'dep_lemma':  dep_lemma,
+                'head_lemma': head_lemma,
+            })
+    return results
 
 # ------------------- 依存弧线 HTML 模板 -------------------
 arc_html_template = """
@@ -550,27 +548,29 @@ draw();
 </html>
 """
 
-def generate_dep_arc_html(dep_df, sentence_id) -> str:
-    sent = dep_df[dep_df["sentence_id"] == sentence_id].copy()
-    if sent.empty:
+def generate_dep_arc_html(dep_rows: list, sentence_id: int) -> str:
+    """依存弧线 HTML，接受 list of dict，不再使用 DataFrame。"""
+    sent = [r for r in dep_rows if int(r.get("sentence_id", -1)) == sentence_id]
+    if not sent:
         return ""
-    sent      = sent.sort_values("dependent_id")
+    sent.sort(key=lambda r: int(r.get("dependent_id", 0)))
     word_dict = {}
-    for _, row in sent.iterrows():
+    for row in sent:
         dep_id = int(row["dependent_id"])
         if dep_id not in word_dict:
             word_dict[dep_id] = {
-                "id": dep_id, "text": str(row["dependent_text"]),
+                "id": dep_id,
+                "text": str(row.get("dependent_text", "")),
                 "upos": str(row.get("upos", "?"))
             }
-        head_id = int(row["head_id"])
+        head_id = int(row.get("head_id", 0))
         if head_id > 0 and head_id not in word_dict:
-            word_dict[head_id] = {"id": head_id, "text": str(row["head_text"]), "upos": "?"}
+            word_dict[head_id] = {"id": head_id, "text": str(row.get("head_text", "")), "upos": "?"}
     sorted_words = sorted(word_dict.values(), key=lambda x: x["id"])
     words_js = [f'{{id:{w["id"]},text:"{w["text"]}",pos:"{w["upos"]}"}}' for w in sorted_words]
     deps_js  = [
-        f'{{dep:{int(row["dependent_id"])},head:{int(row["head_id"])},rel:"{row["deprel"]}"}}'
-        for _, row in sent.iterrows()
+        f'{{dep:{int(r["dependent_id"])},head:{int(r["head_id"])},rel:"{r["deprel"]}"}}'
+        for r in sent
     ]
     return (arc_html_template
             .replace("__WORDS__", "[" + ",".join(words_js) + "]")
@@ -633,16 +633,17 @@ def get_word_info(word):
 # ===================================================================
 # 依存距离计算
 # ===================================================================
-def compute_dep_distances(sent_deps_df: pd.DataFrame) -> dict:
-    if sent_deps_df.empty:
+def compute_dep_distances(sent_deps: list) -> dict:
+    """接受 list of dict，不再依赖 DataFrame。"""
+    if not sent_deps:
         return {"dep_pairs": [], "mdd": None, "max_dd": None}
     pairs     = []
     distances = []
-    for _, row in sent_deps_df.iterrows():
+    for row in sent_deps:
         try:
             dep_id  = int(row["dependent_id"])
             head_id = int(row["head_id"])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             continue
         dep_text  = str(row.get("dependent_text", ""))
         head_text = str(row.get("head_text", ""))
@@ -676,27 +677,8 @@ def get_behavior_log_path(username: str) -> Path:
 # ===================================================================
 
 # ✨ 新增：支持 Numpy/Pandas 各种数据类型的智能 JSON 编码器
-class NpPandasJsonEncoder(json.JSONEncoder):
-    def default(self, obj):
-        # 1. 处理 Numpy 整数 (int64, int32等)
-        if isinstance(obj, (np.integer, np.int64, np.int32)):
-            return int(obj)
-        # 2. 处理 Numpy 浮点数 (float64, float32等)
-        elif isinstance(obj, (np.floating, np.float64, np.float32)):
-            return float(obj)
-        # 3. 处理 Numpy 数组
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        # 4. 处理 Pandas 的可空 Int64/Float64 以及 NAType
-        elif pd.isna(obj): # 自动兼容 pd.NA 和 np.nan，转为 JSON 的 null
-            return None
-        try:
-            # 5. 兜底处理：部分特殊的 Pandas 标量类型
-            if hasattr(obj, 'item'):
-                return obj.item()
-        except Exception:
-            pass
-        return super().default(obj)
+# NpPandasJsonEncoder 已移除（pandas/numpy 依赖已去除）
+# 行为日志现在直接写入 SQLite，无需 JSON 序列化
 
 # def append_behavior_record(username: str, record: dict):
 #     path = get_behavior_log_path(username)
@@ -706,18 +688,12 @@ class NpPandasJsonEncoder(json.JSONEncoder):
 #     except Exception:
 #         pass
 def append_behavior_record(username: str, record: dict):
-    path = get_behavior_log_path(username)
+    """将行为记录写入 SQLite，替代原 JSONL 文件方案。"""
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            # ✨ 核心改动：挂载智能编码器 cls=NpPandasJsonEncoder
-            serialized_str = json.dumps(record, ensure_ascii=False, cls=NpPandasJsonEncoder)
-            f.write(serialized_str + "\n")
+        insert_record(record)
     except Exception as e:
-        # 🛡️ 极其重要的防御性日志：如果在自托管控制台里跑，至少能看到为什么失败
         import logging
         logging.error(f"Failed to save behavior record for {username}: {e}")
-        # 如果你想在 Streamlit 页面隐蔽处打印，也可以放开下面这行（可选）：
-        # st.sidebar.error(f"Log Error: {e}")
 
 
 # ===================================================================
@@ -1031,11 +1007,6 @@ if "_pending_behavior_save" not in st.session_state:
 # 内部成功登录后，应当自动将 st.session_state.is_logged_in 设为 True，并将账号写入 st.session_state.username
 render_auth_sidebar()
 
-# ── 【修复】同步 auth.py 写入的 current_user → is_logged_in / username ──
-_cu = st.session_state.get("current_user")
-if _cu:
-    st.session_state.is_logged_in = True
-    st.session_state.username = _cu
 
 # ── 3. 全局未登录权限拦截门禁 ──
 if not st.session_state.is_logged_in or st.session_state.username == "guest":
@@ -1218,10 +1189,10 @@ with tab1:
         cumulative_counter   = book_progress["cumulative_counter"]
         current_sentence     = book_progress["current_sentence"]
 
-    sentences_df        = data["sentences"]
+    sentences           = data["sentences"]      # list of dict
     all_sentence_lemmas = data["all_sentence_lemmas"]
     global_freq_dict    = data["global_freq_dict"]
-    total_sentences     = len(sentences_df)
+    total_sentences     = len(sentences)
 
     max_view    = current_sentence if current_sentence < total_sentences else total_sentences - 1
     view_key    = f"view_sentence_{book_name}"
@@ -1269,28 +1240,17 @@ with tab1:
     dep_roles_by_position = {}
     dep_map_by_position   = {}
 
-    row           = sentences_df.iloc[display_sentence]
+    row           = sentences[display_sentence]       # dict
     sentence_text = row.get("tokenized_sentence", "")
-    sentence_id   = row["sentence_id"]
-    sent_deps_df  = dep_index.get(sentence_id, pd.DataFrame())
+    sentence_id   = int(row["sentence_id"])
+    sent_deps     = dep_index.get(sentence_id, [])
 
-    sent_deps_df = dep_index.get(sentence_id, [])
-
-    # 兼容两种结构的判空
-    is_valid_deps = false
-    if isinstance(sent_deps_df, pd.DataFrame):
-        is_valid_deps = not sent_deps_df.empty
-    else:
-        is_valid_deps = len(sent_deps_df) > 0
-
-    if is_valid_deps:
+    # sent_deps 已在上方赋值为 list of dict
+    if sent_deps:
         core_rels = {"nsubj", "nsubj:pass", "obj", "iobj", "csubj", "csubj:pass", "ccomp", "xcomp", "root", "ROOT"}
         modifier_rels = {"amod", "advmod", "obl", "nmod", "appos", "acl", "acl:relcl"}
 
-        # 动态选择迭代器
-        iterator = sent_deps_df.iterrows() if isinstance(sent_deps_df, pd.DataFrame) else enumerate(sent_deps_df)
-
-        for _, r in iterator:
+        for r in sent_deps:
 
             rel        = str(r.get("deprel", "")).lower()
             dep_text   = str(r.get("dependent_text", ""))
@@ -1326,7 +1286,7 @@ with tab1:
                 if dep_lemma: modifier_lemmas.add(dep_lemma)
 
     # ── 依存距离指标 ──
-    dep_dist_info = compute_dep_distances(sent_deps_df)
+    dep_dist_info = compute_dep_distances(sent_deps)
 
     # ── 句子简化 ──
     st.markdown("### ✂️ Sentence simplification")
@@ -1489,12 +1449,11 @@ with tab1:
         ))
 
         st.markdown("### Reading interaction")
-        interaction_df = pd.DataFrame([{
-            "Clicked Word":       ", ".join(clicked_words)  if clicked_words  else "—",
-            "Dependency Relation": ", ".join(clicked_rels)  if clicked_rels   else "—",
-            "Dependency Pair":    ", ".join(clicked_pairs)  if clicked_pairs  else "—",
-        }])
-        st.dataframe(interaction_df, hide_index=True, use_container_width=True)
+        st.dataframe([{
+            "Clicked Word":        ", ".join(clicked_words) if clicked_words else "—",
+            "Dependency Relation": ", ".join(clicked_rels)  if clicked_rels  else "—",
+            "Dependency Pair":     ", ".join(clicked_pairs) if clicked_pairs else "—",
+        }], hide_index=True, use_container_width=True)
 
         if dep_dist_info["dep_pairs"]:
             st.markdown("**Dependency distances for each pair in this sentence:**")
@@ -1506,8 +1465,7 @@ with tab1:
                 "head_id":   p["head_id"],
                 "distance":  p["distance"] if p["distance"] is not None else "root",
             } for p in dep_dist_info["dep_pairs"]]
-            st.dataframe(pd.DataFrame(pairs_display),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(pairs_display, use_container_width=True, hide_index=True)
 
     # ── TTS ──
 
@@ -1780,10 +1738,10 @@ function copyText2(){{_doCopy();}}
             st.session_state[dep_key] = not st.session_state[dep_key]
             st.rerun()
     if st.session_state[dep_key]:
-        sent_deps = data["dep_df"][data["dep_df"]["sentence_id"] == sentence_id]
-        if not sent_deps.empty:
+        sent_deps_show = [r for r in data["dep_rows"] if int(r.get("sentence_id", -1)) == sentence_id]
+        if sent_deps_show:
             st.subheader("Dependency relations")
-            for _, r in sent_deps.iterrows():
+            for r in sent_deps_show:
                 head = str(r.get('head_text', ''))
                 dep  = str(r.get('dependent_text', ''))
                 rel  = str(r.get('deprel', ''))
@@ -1804,7 +1762,7 @@ function copyText2(){{_doCopy();}}
                 st.session_state[tree_key] = not st.session_state[tree_key]
                 st.rerun()
         if st.session_state[tree_key]:
-            arc_html = generate_dep_arc_html(data["dep_df"], sentence_id)
+            arc_html = generate_dep_arc_html(data["dep_rows"], sentence_id)
             if arc_html:
                 components.html(arc_html, height=420, scrolling=False)
             else:
@@ -2020,7 +1978,7 @@ with tab2:
 
             if selected_lemma:
                 sentences_for_word = get_word_sentences(
-                    selected_lemma, sentences_df, all_sentence_lemmas)
+                    selected_lemma, sentences, all_sentence_lemmas)
                 if not sentences_for_word:
                     st.info("No sentences containing this word were found in this book.")
                 else:
@@ -2051,45 +2009,30 @@ with tab2:
                     else:
                         # ── ⚡ 适配修改 1：移除 lemmatizer，直接转为标准小写 ──
                         lemma_dep = dep_query.strip().lower()
-                        dep_df = data.get("dep_df", pd.DataFrame())
+                        dep_rows_all = data.get("dep_rows", [])
+                        matched_deps = [
+                            r for r in dep_rows_all
+                            if r.get("dependent_lemma", "").lower() == lemma_dep
+                            or r.get("head_lemma", "").lower() == lemma_dep
+                        ]
+                        matched_deps.sort(key=lambda r: int(r.get("sentence_id", 0)))
 
-                        # ── ⚡ 适配修改 2：直接基于新版预计算列进行全表筛选 ──
-                        if not dep_df.empty:
-                            # 匹配 dependent_lemma 或 head_lemma 等于当前查询词的所有依存记录
-                            matched_deps = dep_df[
-                                (dep_df['dependent_lemma'] == lemma_dep) |
-                                (dep_df['head_lemma'] == lemma_dep)
-                                ]
-                        else:
-                            matched_deps = pd.DataFrame()
-
-                        if not matched_deps.empty:
+                        if matched_deps:
                             st.subheader("Dependency relations (ordered by sentence index)")
-                            current_sid = sentences_df.iloc[display_sentence]["sentence_id"]
+                            current_sid = int(sentences[display_sentence]["sentence_id"])
                             shown = 0
-
-                            # 按照句子的原始顺序升序排列显示
-                            matched_deps = matched_deps.sort_values(by="sentence_id")
-
-                            for _, row in matched_deps.iterrows():
+                            for row in matched_deps:
                                 if shown >= 200:
                                     break
-
-                                sid = int(row['sentence_id'])
-                                # 动态拼装可读性更高的关系文本，代替旧版未定义的 relation 字段
+                                sid = int(row["sentence_id"])
                                 relation = f"[{row['dependent_text']}] --({row['deprel']})--> [{row['head_text']}]"
-
-                                # 高亮当前用户正在阅读的句子
                                 if sid == current_sid:
                                     st.markdown(f"**★ [{sid}]** `{relation}`")
                                 else:
                                     st.text(f"[{sid}] {relation}")
                                 shown += 1
-
                             if len(matched_deps) > 200:
-                                st.info(
-                                    f"{len(matched_deps)} relations in total, "
-                                    f"showing the first 200.")
+                                st.info(f"{len(matched_deps)} relations in total, showing the first 200.")
                         else:
                             st.info("No dependency relations found for this word.")
 # with tab2:
@@ -2125,7 +2068,7 @@ with tab2:
 #                 format_func=lambda x: f"{lemma_to_word.get(x, x)} ({x})")
 #             if selected_lemma:
 #                 sentences_for_word = get_word_sentences(
-#                     selected_lemma, sentences_df, all_sentence_lemmas)
+#                     selected_lemma, sentences, all_sentence_lemmas)
 #                 if not sentences_for_word:
 #                     st.info("No sentences containing this word were found in this book.")
 #                 else:
@@ -2209,13 +2152,11 @@ with tab3:
 
         st.markdown("### 📈 Vocabulary coverage statistics (Current Progress)")
         stats_cols = st.columns(4)
-        for idx, (level, wl_df) in enumerate(sorted(standard_wordlists.items())):
+        for idx, (level, wl_set) in enumerate(sorted(standard_wordlists.items())):
             if idx >= 4:
                 break
-
-            # 确保提取标准词表的原型为小写集合
-            wordlist_lemmas = set(wl_df['lemma'].str.lower().str.strip())
-            # 计算用户见过的词与标准词表的交集
+            # wl_set 已经是 set，直接求交集
+            wordlist_lemmas = wl_set
             intersection = text_lemmas & wordlist_lemmas
 
             coverage = (len(intersection) / len(wordlist_lemmas) * 100 if wordlist_lemmas else 0)
@@ -2235,15 +2176,19 @@ with tab3:
     with col1:
         if st.button("📊 Show dependency relation types", key="btn_show_deprels"):
             # 确保数据源存在且不为空
-            if "dep_df" in data and isinstance(data["dep_df"], pd.DataFrame) and not data["dep_df"].empty:
-                counts = data["dep_df"]["deprel"].value_counts()
+            dep_rows_tab3 = data.get("dep_rows", [])
+            if dep_rows_tab3:
+                from collections import Counter as _C
+                deprel_counts = _C(r.get("deprel", "") for r in dep_rows_tab3)
+                labels = list(deprel_counts.keys())
+                values = list(deprel_counts.values())
                 fig = px.bar(
-                    counts, x=counts.index, y=counts.values,
-                    labels={'x': 'Dependency Relation (deprel)', 'y': 'Count'},
+                    x=labels, y=values,
+                    labels={"x": "Dependency Relation (deprel)", "y": "Count"},
                     title="Distribution of Dependency Relation Types in Current Book",
-                    color_discrete_sequence=['#1976D2']
+                    color_discrete_sequence=["#1976D2"]
                 )
-                fig.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("No dependency data available for this book.")
@@ -2253,38 +2198,23 @@ with tab3:
             if user_seen_counter:
                 # ── ⚡ 核心对齐修改 2：用用户当前的动态词频字典直接渲染，提速百倍 ──
                 # 将内存字典瞬间转为 DataFrame，避免任何多余的 NLTK 实时处理
-                display_df = pd.DataFrame(list(user_seen_counter.items()), columns=['lemma', 'frequency'])
-
-                # 补充词表分级字段（结合加载的 COCA 词表）
-                display_df['wordlist'] = 'Unknown'
-                for level, wl_df in standard_wordlists.items():
-                    wl_set = set(wl_df['lemma'].str.lower().str.strip())
-                    # 批量打标匹配
-                    mask = display_df['lemma'].str.lower().isin(wl_set)
-                    display_df.loc[mask, 'wordlist'] = f'COCA_{level}'
-
-
-                # 定义词表排序加权权重
-                def get_wordlist_order(wl):
-                    if 'COCA' in str(wl):
-                        try:
-                            return int(str(wl).split('_')[1])
-                        except Exception:
-                            pass
+                def _wl_order(wl):
+                    if "COCA" in str(wl):
+                        try: return int(str(wl).split("_")[1])
+                        except Exception: pass
                     return 999999
 
+                rows_freq = []
+                for lemma_key, freq_val in user_seen_counter.items():
+                    wl_label = "Unknown"
+                    for level, wl_set in sorted(standard_wordlists.items()):
+                        if str(lemma_key).lower() in wl_set:
+                            wl_label = f"COCA_{level}"
+                            break
+                    rows_freq.append({"lemma": lemma_key, "frequency": freq_val, "wordlist": wl_label})
 
-                # 按照词表级别升序（如COCA_1排最前），同级别内按用户见过的频次降序排列
-                display_df['_sort_key'] = display_df['wordlist'].apply(get_wordlist_order)
-                display_df = display_df.sort_values(['_sort_key', 'frequency'], ascending=[True, False])
-                display_df = display_df.drop('_sort_key', axis=1)
-
-                # 完美大表渲染，隐藏默认索引
-                st.dataframe(
-                    display_df[['lemma', 'frequency', 'wordlist']],
-                    use_container_width=True,
-                    hide_index=True
-                )
+                rows_freq.sort(key=lambda r: (_wl_order(r["wordlist"]), -r["frequency"]))
+                st.dataframe(rows_freq, use_container_width=True, hide_index=True)
             else:
                 st.info("Your dynamic word frequency table is empty. Read some sentences first!")
 # with tab3:
@@ -2424,12 +2354,7 @@ with tab3:
     st.markdown("---")
     st.markdown("### 📊 Reading behavior data")
 
-    log_path = get_behavior_log_path(username)
-    if log_path.exists():
-        with open(log_path, "r", encoding="utf-8") as f:
-            records = [json.loads(line) for line in f if line.strip()]
-    else:
-        records = []
+    records = query_records(username)
 
     if not records:
         st.info("No behavior log found. Behavior data will appear here after you read sentences.")
@@ -2447,7 +2372,7 @@ with tab3:
             "trigger":      r.get("trigger", ""),
             "clicks":       len(r.get("click_log", [])),
         } for r in records]
-        dwell_df = pd.DataFrame(dwell_data)
+        dwell_df = dwell_data  # list of dict, st.dataframe accepts directly
 
         # ── 聚合统计 ──
         word_stats:   dict = {}
@@ -2486,52 +2411,38 @@ with tab3:
 
         # ── 构建 DataFrame ──
         # [Fix-C] 列名全部统一为 _ms，不再做 /1000
-        word_df = (
-            pd.DataFrame([{
-                "word":           w,
-                "clicks":         s["clicks"],
-                "avg_dwell_ms":   round(s["total_dwell_ms"] / s["clicks"]),
-                "total_dwell_ms": round(s["total_dwell_ms"]),
-            } for w, s in word_stats.items()])
-            .sort_values("clicks", ascending=False).reset_index(drop=True)
-        ) if word_stats else pd.DataFrame(
-            columns=["word", "clicks", "avg_dwell_ms", "total_dwell_ms"])
+        word_df = sorted([
+            {"word": w, "clicks": s["clicks"],
+             "avg_dwell_ms": round(s["total_dwell_ms"] / s["clicks"]),
+             "total_dwell_ms": round(s["total_dwell_ms"])}
+            for w, s in word_stats.items()
+        ], key=lambda r: -r["clicks"]) if word_stats else []
 
-        deprel_df = (
-            pd.DataFrame([{
-                "deprel":         rel,
-                "label":          label_deprel(rel),
-                "clicks":         s["clicks"],
-                "avg_dwell_ms":   round(s["total_dwell_ms"] / s["clicks"]),
-                "total_dwell_ms": round(s["total_dwell_ms"]),
-            } for rel, s in deprel_stats.items()])
-            .sort_values("clicks", ascending=False).reset_index(drop=True)
-        ) if deprel_stats else pd.DataFrame(
-            columns=["deprel", "label", "clicks", "avg_dwell_ms", "total_dwell_ms"])
+        deprel_df = sorted([
+            {"deprel": rel, "label": label_deprel(rel), "clicks": s["clicks"],
+             "avg_dwell_ms": round(s["total_dwell_ms"] / s["clicks"]),
+             "total_dwell_ms": round(s["total_dwell_ms"])}
+            for rel, s in deprel_stats.items()
+        ], key=lambda r: -r["clicks"]) if deprel_stats else []
 
-        pair_df = (
-            pd.DataFrame([{
-                "pair":           k,
-                "word":           v["word"],
-                "head_lemma":     v["head_lemma"],
-                "deprel":         v["deprel"],
-                "clicks":         v["clicks"],
-                "avg_dwell_ms":   round(v["total_dwell_ms"] / v["clicks"]),
-                "total_dwell_ms": round(v["total_dwell_ms"]),
-            } for k, v in pair_stats.items()])
-            .sort_values("clicks", ascending=False).reset_index(drop=True)
-        ) if pair_stats else pd.DataFrame(
-            columns=["pair","word","head_lemma","deprel","clicks","avg_dwell_ms","total_dwell_ms"])
+        pair_df = sorted([
+            {"pair": k, "word": v["word"], "head_lemma": v["head_lemma"],
+             "deprel": v["deprel"], "clicks": v["clicks"],
+             "avg_dwell_ms": round(v["total_dwell_ms"] / v["clicks"]),
+             "total_dwell_ms": round(v["total_dwell_ms"])}
+            for k, v in pair_stats.items()
+        ], key=lambda r: -r["clicks"]) if pair_stats else []
 
         # ── 指标看板 ──
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Records",              len(records))
-        m2.metric("Avg dwell (ms)",
-                  f"{dwell_df['dwell_ms'].mean():.0f}" if not dwell_df.empty else "—")
-        m3.metric("Total clicks",         int(dwell_df["clicks"].sum()))
+        _dwells  = [r["dwell_ms"] for r in dwell_df if r.get("dwell_ms") is not None]
+        _clicks  = [r["clicks"]   for r in dwell_df if r.get("clicks")   is not None]
+        _mdds    = [r["mdd"]      for r in dwell_df if r.get("mdd")      is not None]
+        m2.metric("Avg dwell (ms)",   f"{sum(_dwells)/len(_dwells):.0f}" if _dwells else "—")
+        m3.metric("Total clicks",     sum(_clicks))
         m4.metric("Unique words clicked", len(word_df))
-        m5.metric("Avg MDD",
-                  f"{dwell_df['mdd'].mean():.2f}" if not dwell_df.empty else "—")
+        m5.metric("Avg MDD",          f"{sum(_mdds)/len(_mdds):.2f}" if _mdds else "—")
 
         # ── 五个子标签 ──
         btab1, btab2, btab3, btab4, btab5 = st.tabs([
@@ -2541,8 +2452,8 @@ with tab3:
 
         with btab1:
             st.markdown("**Dwell time and MDD per sentence**")
-            plot_df = dwell_df.dropna(subset=["mdd", "dwell_ms"])
-            if not plot_df.empty:
+            plot_df = [r for r in dwell_df if r.get("mdd") is not None and r.get("dwell_ms") is not None]
+            if plot_df:
                 fig = px.scatter(
                     plot_df, x="mdd", y="dwell_ms",
                     size="word_count", color="clicks",
@@ -2556,15 +2467,16 @@ with tab3:
                 st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("**Dwell time over sentences (chronological)**")
-            if not dwell_df.empty:
+            if dwell_df:
                 fig2 = go.Figure()
+                _x_idx = list(range(len(dwell_df)))
                 fig2.add_trace(go.Scatter(
-                    x=dwell_df.index, y=dwell_df["dwell_ms"],
+                    x=_x_idx, y=[r.get("dwell_ms") for r in dwell_df],
                     mode="lines+markers", name="Dwell time (ms)",
                     line=dict(color="#7F77DD", width=1.5), marker=dict(size=4),
                 ))
                 fig2.add_trace(go.Scatter(
-                    x=dwell_df.index, y=dwell_df["mdd"],
+                    x=_x_idx, y=[r.get("mdd") for r in dwell_df],
                     mode="lines", name="MDD",
                     line=dict(color="#1D9E75", width=1.5, dash="dot"),
                     yaxis="y2",
@@ -2579,7 +2491,7 @@ with tab3:
                 st.plotly_chart(fig2, use_container_width=True)
 
         with btab2:
-            if word_df.empty:
+            if not word_df:
                 st.info("No word clicks recorded yet.")
             else:
                 st.markdown(f"**{len(word_df)} unique words clicked**")
@@ -2605,7 +2517,7 @@ with tab3:
                 )
 
         with btab3:
-            if deprel_df.empty:
+            if not deprel_df:
                 st.info("No dependency relation clicks recorded yet.")
             else:
                 st.markdown(f"**{len(deprel_df)} dependency relation types triggered**")
@@ -2632,7 +2544,7 @@ with tab3:
                 )
 
         with btab4:
-            if pair_df.empty:
+            if not pair_df:
                 st.info("No dependency pair clicks recorded yet.")
             else:
                 st.markdown(f"**{len(pair_df)} unique dependency pairs triggered**")
@@ -2692,7 +2604,7 @@ with tab3:
                     ))),
                 })
             st.dataframe(
-                pd.DataFrame(summary_rows),
+                summary_rows,
                 column_config={
                     "timestamp":           st.column_config.TextColumn("Timestamp"),
                     "sentence_idx":        st.column_config.NumberColumn("Sent.", format="%d"),
