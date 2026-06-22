@@ -90,6 +90,11 @@ def render_auth_sidebar():
                 if ok:
                     st.session_state["current_user"] = data["username"]
                     st.session_state["auth_token"]   = data["token"]
+
+                    # ── 新增：同步 app.py 依赖的两个键 ──
+                    st.session_state["is_logged_in"] = True
+                    st.session_state["username"] = data["username"]
+
                     st.rerun()
                 else:
                     st.error(data.get("detail", "Login failed."))
