@@ -6,10 +6,32 @@ from pathlib import Path
 from collections import Counter, defaultdict
 
 
+# def _read_csv(path: Path) -> list:
+#     """用标准库 csv 读取文件，返回 list of dict。"""
+#     # # with open(path, newline='', encoding='utf-8') as f:
+#     # #     return list(csv.DictReader(f))
+#     # with open(file_path, 'r', encoding='utf-8-sig') as f:
+#     #     reader = csv.DictReader(f)
+#     #     for row in reader:
+
+
 def _read_csv(path: Path) -> list:
-    """用标准库 csv 读取文件，返回 list of dict。"""
-    with open(path, newline='', encoding='utf-8') as f:
-        return list(csv.DictReader(f))
+    """用标准库 csv 读取文件，返回 list of dict。
+    使用 utf-8-sig 编码自动剔除 Windows BOM 头，防止 sentence_id 发生 KeyError。
+    """
+    data_list = []
+
+    # 注意：将你原本笔误的 file_path 改回参数中的 path
+    with open(path, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # row 本身就是一个 dict（例如: {'sentence_id': '1', 'text': 'Hello...'}）
+            data_list.append(row)
+
+    # 整个文件读完后，返回装满字典的列表
+    return data_list
+
+# 此时 row["sentence_id"] 就能被百分之百安全读取了
 
 
 @st.cache_resource(show_spinner="⚡ Loading precomputed book vectors...")
