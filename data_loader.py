@@ -88,7 +88,7 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
             all_sentence_lemmas[idx] = [
                 l.lower().strip()
                 for _, l in pairs
-                if l and l.strip()
+                if l and l.strip() and l.strip().isalpha()  # 过滤标点、数字，只保留纯字母词
             ]
 
     # ── 4. 全局词频字典（从 lemma_pos_rows 统计）──
@@ -116,13 +116,24 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
             w_lemma = r.get(key_col, '').lower().strip()
             dep_index[(sid, w_lemma)].append(r)
 
+    # ── 7. dep_by_sid：按 sentence_id 聚合，供句子级批量查询 ──
+    # dep_index 键是 (sid, lemma) tuple，适合词级精确查询
+    # dep_by_sid 键是纯 int sid，适合渲染当前句子全部依存关系
+    dep_by_sid: dict = defaultdict(list)
+    for r in dep_rows:
+        try:
+            dep_by_sid[int(r['sentence_id'])].append(r)
+        except (ValueError, KeyError):
+            pass
+
     return {
         "slug":                slug,
-        "sentences":           sentences,        # list of dict
+        "sentences":           sentences,
         "all_sentence_lemmas": all_sentence_lemmas,
         "sentence_deltas":     sentence_deltas,
         "prefix_counters":     prefix_counters,
         "global_freq_dict":    global_freq_dict,
-        "dep_rows":            dep_rows,         # list of dict（原 dep_df）
-        "dep_index":           dict(dep_index),
+        "dep_rows":            dep_rows,
+        "dep_index":           dict(dep_index),   # 键: (sid, lemma) — 词级查询
+        "dep_by_sid":          dict(dep_by_sid),  # 键: sid (int)    — 句子级查询
     }

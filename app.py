@@ -550,7 +550,13 @@ draw();
 
 def generate_dep_arc_html(dep_rows: list, sentence_id: int) -> str:
     """依存弧线 HTML，接受 list of dict，不再使用 DataFrame。"""
-    sent = [r for r in dep_rows if int(r.get("sentence_id", -1)) == sentence_id]
+    sent = []
+    for r in dep_rows:
+        try:
+            if int(r.get("sentence_id", -1)) == sentence_id:
+                sent.append(r)
+        except (ValueError, TypeError):
+            continue
     if not sent:
         return ""
     sent.sort(key=lambda r: int(r.get("dependent_id", 0)))
@@ -1236,7 +1242,9 @@ with tab1:
         st.session_state["_pending_behavior_save"] = None
 
     # ── 依存数据 ──
-    dep_index   = data["dep_index"]
+    # dep_index 键是 (sid, lemma)，词级查询用
+    # dep_by_sid 键是纯 int sid，句子级批量查询用 ← 此处使用
+    dep_by_sid  = data.get("dep_by_sid", {})
     core_lemmas     = set()
     modifier_lemmas = set()
     dep_roles_by_position = {}
@@ -1245,7 +1253,7 @@ with tab1:
     row           = sentences[display_sentence]       # dict
     sentence_text = row.get("tokenized_sentence", "")
     sentence_id   = int(row["sentence_id"])
-    sent_deps     = dep_index.get(sentence_id, [])
+    sent_deps     = dep_by_sid.get(sentence_id, [])
 
     # sent_deps 已在上方赋值为 list of dict
     if sent_deps:
@@ -1740,7 +1748,7 @@ function copyText2(){{_doCopy();}}
             st.session_state[dep_key] = not st.session_state[dep_key]
             st.rerun()
     if st.session_state[dep_key]:
-        sent_deps_show = [r for r in data["dep_rows"] if int(r.get("sentence_id", -1)) == sentence_id]
+        sent_deps_show = data.get("dep_by_sid", {}).get(sentence_id, [])
         if sent_deps_show:
             st.subheader("Dependency relations")
             for r in sent_deps_show:
@@ -2150,7 +2158,12 @@ with tab3:
     # ── 📈 动态词汇覆盖率统计 ──
     if user_seen_counter and standard_wordlists:
         # 统一转为小写集合，用于高精度集合交集计算
-        text_lemmas = {str(k).lower().strip() for k in user_seen_counter.keys()}
+        # 只保留纯字母词，过滤标点、数字，确保和 COCA 词表对齐
+        text_lemmas = {
+            str(k).lower().strip()
+            for k in user_seen_counter.keys()
+            if str(k).strip().isalpha()
+        }
 
         st.markdown("### 📈 Vocabulary coverage statistics (Current Progress)")
         stats_cols = st.columns(4)
@@ -2161,7 +2174,11 @@ with tab3:
             wordlist_lemmas = wl_set
             intersection = text_lemmas & wordlist_lemmas
 
-            coverage = (len(intersection) / len(wordlist_lemmas) * 100 if wordlist_lemmas else 0)
+            # 分母：全书出现过的 COCA 词种类（而非整个 COCA 词表）
+            # 这样覆盖率表示"你已读到该级别多少比例的词"，更贴近实际阅读进度
+            book_lemmas   = {str(k).lower().strip() for k in data["global_freq_dict"].keys() if str(k).strip().isalpha()}
+            book_in_coca  = book_lemmas & wordlist_lemmas
+            coverage = (len(intersection) / len(book_in_coca) * 100 if book_in_coca else 0)
 
             with stats_cols[idx]:
                 st.metric(
@@ -2201,8 +2218,9 @@ with tab3:
                 # ── ⚡ 核心对齐修改 2：用用户当前的动态词频字典直接渲染，提速百倍 ──
                 # 将内存字典瞬间转为 DataFrame，避免任何多余的 NLTK 实时处理
                 def _wl_order(wl):
+                    # 解析 "COCA 1-5000" 格式，取起始数字排序
                     if "COCA" in str(wl):
-                        try: return int(str(wl).split("_")[1])
+                        try: return int(str(wl).split()[1].split("-")[0])
                         except Exception: pass
                     return 999999
 
@@ -2211,7 +2229,7 @@ with tab3:
                     wl_label = "Unknown"
                     for level, wl_set in sorted(standard_wordlists.items()):
                         if str(lemma_key).lower() in wl_set:
-                            wl_label = f"COCA_{level}"
+                            wl_label = f"COCA {(level-1)*5000+1}-{level*5000}"
                             break
                     rows_freq.append({"lemma": lemma_key, "frequency": freq_val, "wordlist": wl_label})
 
