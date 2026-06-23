@@ -27,13 +27,37 @@ from pathlib import Path
 # 🔍 补上这行：定义服务器上存放词汇表（COCA等）的绝对路径
 #WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
 # ==================== 路径配置块 ====================
-BASE_DIR = Path("/opt/prism/logs")
-BASE_DIR.mkdir(parents=True, exist_ok=True)
+# BASE_DIR = Path("/opt/prism/logs")
+# BASE_DIR.mkdir(parents=True, exist_ok=True)
+#
+# WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
+# # 如果新版词汇宇宙或者 load_wordlist_data 还会用到 SINGLE/COMBINED 分析结果，也应一并统一到自托管路径：
+# SINGLE_DIR = Path("/opt/prism/app/vocabulary/single")
+# COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
 
-WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
-# 如果新版词汇宇宙或者 load_wordlist_data 还会用到 SINGLE/COMBINED 分析结果，也应一并统一到自托管路径：
-SINGLE_DIR = Path("/opt/prism/app/vocabulary/single")
-COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
+# 1. 定义真正的项目根目录（当前 app.py 所在的目录，两边环境都通用）
+APP_ROOT = Path(__file__).resolve().parent
+
+# 2. 区分环境动态配置路径
+# 检查是否在 Streamlit Cloud 运行（云端通常有特定的环境变量）
+IS_STREAMLIT_CLOUD = "STREAMLIT_RUNTIME_MOCK" in os.environ or "HOSTNAME" not in os.environ
+
+if IS_STREAMLIT_CLOUD:
+    # ---- Streamlit Cloud 环境配置 ----
+    # 云端只有 /tmp 目录可写，词汇表通常随 GitHub 代码一同提交
+    LOGS_DIR = Path("/tmp/prism/logs")
+    WORDLISTS_DIR = APP_ROOT / "wordlists"
+    SINGLE_DIR = APP_ROOT / "vocabulary/single"
+    COMBINED_DIR = APP_ROOT / "vocabulary/combined"
+else:
+    # ---- 你自己的自托管服务器环境配置 ----
+    LOGS_DIR = Path("/opt/prism/logs")
+    WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
+    SINGLE_DIR = Path("/opt/prism/app/vocabulary/single")
+    COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
+
+# 自动创建日志文件夹
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
@@ -112,6 +136,7 @@ DEPREL_LABELS = {
 }
 # 在循环上方或全局，确保有这个映射表，或者进行安全获取
 labels_dict = globals().get('DEPREL_LABELS', {})
+#labels_dict未调用
 
 def label_deprel(rel: str) -> str:
     note = DEPREL_LABELS.get(rel) or DEPREL_LABELS.get(rel.lower())
@@ -152,8 +177,8 @@ except ImportError:
 # BASE_DIR.mkdir(exist_ok=True)
 #############################################################################
 # [改动A] 自托管服务器上 /opt/prism 可持久写入，不再用 /tmp
-BASE_DIR = Path("/opt/prism/logs")
-BASE_DIR.mkdir(parents=True, exist_ok=True)
+#BASE_DIR = Path("/opt/prism/logs")
+#BASE_DIR.mkdir(parents=True, exist_ok=True)
 #############################################################################
 # BUILT_IN_BOOKS 保留变量名供后续代码兼容，内容来自 book_registry
 BUILT_IN_BOOKS = [v["slug"] for v in BOOK_REGISTRY.values()]
@@ -222,11 +247,13 @@ def find_dp_folder(book_stem):
     return None
 
 
-@st.cache_data
+@st.cache_data(show_spinner="Initializing vocabulary database...")
 def load_standard_wordlists():
     """
     加载 COCA 词表，返回 {level: set(lemmas)} 而非 DataFrame。
     使用 set 可以做 O(1) 成员检查，比 DataFrame 快很多。
+    show_spinner=True 会让 Streamlit 自动在【只有第一次真正加载文件时】显示加载动画，
+    后续用户直接走缓存，不会看到任何动画，体验极佳。
     """
     wordlists = {}
     if not WORDLISTS_DIR.exists():
@@ -236,21 +263,21 @@ def load_standard_wordlists():
     for i, file_name in enumerate(file_names, 1):
         wordlist_path = WORDLISTS_DIR / file_name
         if wordlist_path.exists():
-            with open(wordlist_path, 'r', encoding='utf-8') as f:
-                lemmas = {line.strip().lower() for line in f if line.strip()}
-            wordlists[i] = lemmas
+            try:
+                with open(wordlist_path, 'r', encoding='utf-8') as f:
+                    lemmas = {line.strip().lower() for line in f if line.strip()}
+                wordlists[i] = lemmas
+            except Exception as e:
+                # 把错误捕获移到文件读取层，防止因单个文件损坏导致全局失败
+                print(f"⚠️ 读取词表 {file_name} 失败: {e}")
     return wordlists
-# ─── ✨ 【新增改动点：全局一次性加载词汇表】 ───
-if "standard_wordlists" not in st.session_state:
-    # 只有当全新的 Session 建立、第一次跑这个脚本时，才会触发这一块
-    with st.spinner("Initializing vocabulary database..."):
-        try:
-            # 这里调用的是你本来就定义好的本地加载函数
-            st.session_state["standard_wordlists"] = load_standard_wordlists()
-        except Exception as e:
-            # 增加安全兜底：防止路径配置错误或文件缺失直接导致整个 App 白屏挂掉
-            st.error(f"⚠️ Vocabulary database loading failed: {e}")
-            st.session_state["standard_wordlists"] = {}
+
+# ─── ✨ 【统一调用口径】 ───
+# 在你需要使用词表的地方（比如主循环、全局配置区），直接一行代码获取：
+standard_wordlists = load_standard_wordlists()
+
+# 如果担心其他地方的代码意外修改了词表，可以加上一行（按需）：
+# standard_wordlists = load_standard_wordlists().copy()
 # ────────────────────────────────────────────────
 
 def load_wordlist_data(book_stem, dp_folder):
@@ -438,32 +465,97 @@ def get_word_sentences(lemma, sentences: list, all_sentence_lemmas: list) -> lis
 #             unique_pairs.append(pair)
 #     unique_pairs.sort(key=lambda x: x['sentence_id'])
 #     return unique_pairs
+# def get_word_dependencies(clicked_word: str, current_sentence_id: int, dep_rows: list) -> list:
+#     """
+#     从 dep_rows（list of dict）中查找与 clicked_word 相关的依存关系。
+#     不再依赖 pandas DataFrame。
+#     """
+#     if not dep_rows:
+#         return []
+#     click_lemma = clicked_word.strip().lower()
+#     results = []
+#     for r in dep_rows:
+#         try:
+#             if int(r['sentence_id']) != current_sentence_id:
+#                 continue
+#         except (ValueError, KeyError):
+#             continue
+#         dep_lemma  = r.get('dependent_lemma', r.get('dependent_text', '')).lower()
+#         head_lemma = r.get('head_lemma',      r.get('head_text',      '')).lower()
+#         if dep_lemma == click_lemma or head_lemma == click_lemma:
+#             results.append({
+#                 'dep_word':   r.get('dependent_text', ''),
+#                 'head_word':  r.get('head_text', ''),
+#                 'deprel':     r.get('deprel', ''),
+#                 'dep_lemma':  dep_lemma,
+#                 'head_lemma': head_lemma,
+#             })
+#     return results
+
+
 def get_word_dependencies(clicked_word: str, current_sentence_id: int, dep_rows: list) -> list:
     """
-    从 dep_rows（list of dict）中查找与 clicked_word 相关的依存关系。
-    不再依赖 pandas DataFrame。
+    高效查找与 clicked_word 相关的依存关系（不依赖 pandas）。
+    支持新增加的 'dependent_lemma' 和 'head_lemma' 列，并自动进行标点安全清洗。
     """
     if not dep_rows:
         return []
-    click_lemma = clicked_word.strip().lower()
+
+    # 1. 统一清洗点击的单词：去空格、去标点、转小写
+    click_lemma = re.sub(r'[^\w]', '', str(clicked_word)).lower().strip()
+    if not click_lemma:
+        return []
+
     results = []
+
     for r in dep_rows:
+        # 2. 如果你需要跨句检索，把下面这 6 行注释掉；如果只想显示当前句，则保留
         try:
-            if int(r['sentence_id']) != current_sentence_id:
+            if int(r.get('sentence_id', -1)) != current_sentence_id:
                 continue
         except (ValueError, KeyError):
             continue
-        dep_lemma  = r.get('dependent_lemma', r.get('dependent_text', '')).lower()
-        head_lemma = r.get('head_lemma',      r.get('head_text',      '')).lower()
+
+        # 3. 提取文本和词干
+        dep_text = str(r.get('dependent_text', ''))
+        head_text = str(r.get('head_text', ''))
+        deprel = str(r.get('deprel', ''))
+        sent_id = r.get('sentence_id', current_sentence_id)
+
+        # 优先使用新增加的 lemma 列，同时做一层标点防护清洗
+        dep_lemma = re.sub(r'[^\w]', '', str(r.get('dependent_lemma', dep_text))).lower().strip()
+        head_lemma = re.sub(r'[^\w]', '', str(r.get('head_lemma', head_text))).lower().strip()
+
+        # 4. 精准匹配
         if dep_lemma == click_lemma or head_lemma == click_lemma:
+            # 5. 拼装回第一段程序完全一致的 Key 结构，保证前端 HTML 不会发生 KeyError 崩溃
+            # 自动生成第一段代码中需要的 label_deprel 翻译关系线（如果你的代码有这个函数）
+            # 假设你全局有 label_deprel 函数，如果没有，可以直接用 f"{head_text} ──{deprel}──> {dep_text}"
+            try:
+                translated_deprel = label_deprel(deprel) if 'label_deprel' in globals() else deprel
+            except Exception:
+                translated_deprel = deprel
+
             results.append({
-                'dep_word':   r.get('dependent_text', ''),
-                'head_word':  r.get('head_text', ''),
-                'deprel':     r.get('deprel', ''),
-                'dep_lemma':  dep_lemma,
-                'head_lemma': head_lemma,
+                'relation': f"{head_text} ──{translated_deprel}──> {dep_text}",
+                'sentence_id': sent_id,
+                'head_text': head_text,
+                'dependent_text': dep_text,
+                'deprel': deprel,
+                'dep_lemma': dep_lemma,  # 保留以便后续需要
+                'head_lemma': head_lemma  # 保留以便后续需要
             })
-    return results
+
+    # 6. 去重与第一段保持一致
+    seen = set()
+    unique_results = []
+    for pair in results:
+        key = (pair['relation'], pair['sentence_id'])
+        if key not in seen:
+            seen.add(key)
+            unique_results.append(pair)
+    unique_pairs.sort(key=lambda x: x['sentence_id'])
+    return unique_results
 
 # ------------------- 依存弧线 HTML 模板 -------------------
 arc_html_template = """
@@ -548,40 +640,113 @@ draw();
 </html>
 """
 
+# def generate_dep_arc_html(dep_rows: list, sentence_id: int) -> str:
+#     """依存弧线 HTML，接受 list of dict，不再使用 DataFrame。"""
+#     sent = []
+#     for r in dep_rows:
+#         try:
+#             if int(r.get("sentence_id", -1)) == sentence_id:
+#                 sent.append(r)
+#         except (ValueError, TypeError):
+#             continue
+#     if not sent:
+#         return ""
+#     sent.sort(key=lambda r: int(r.get("dependent_id", 0)))
+#     word_dict = {}
+#     for row in sent:
+#         dep_id = int(row["dependent_id"])
+#         if dep_id not in word_dict:
+#             word_dict[dep_id] = {
+#                 "id": dep_id,
+#                 "text": str(row.get("dependent_text", "")),
+#                 "upos": str(row.get("upos", "?"))
+#             }
+#         head_id = int(row.get("head_id", 0))
+#         if head_id > 0 and head_id not in word_dict:
+#             word_dict[head_id] = {"id": head_id, "text": str(row.get("head_text", "")), "upos": "?"}
+#     sorted_words = sorted(word_dict.values(), key=lambda x: x["id"])
+#     words_js = [f'{{id:{w["id"]},text:"{w["text"]}",pos:"{w["upos"]}"}}' for w in sorted_words]
+#     deps_js  = [
+#         f'{{dep:{int(r["dependent_id"])},head:{int(r["head_id"])},rel:"{r["deprel"]}"}}'
+#         for r in sent
+#     ]
+#     return (arc_html_template
+#             .replace("__WORDS__", "[" + ",".join(words_js) + "]")
+#             .replace("__DEPS__",  "[" + ",".join(deps_js)  + "]"))
+
 def generate_dep_arc_html(dep_rows: list, sentence_id: int) -> str:
-    """依存弧线 HTML，接受 list of dict，不再使用 DataFrame。"""
+    """
+    依存弧线 HTML，接受 list of dict，不再使用 DataFrame。
+    加入强力安全防护，防止 KeyError 和标点符号错位引发白屏。
+    """
+    if not dep_rows:
+        return ""
+
     sent = []
     for r in dep_rows:
         try:
+            # 严格确保 sentence_id 对齐
             if int(r.get("sentence_id", -1)) == sentence_id:
                 sent.append(r)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             continue
+
     if not sent:
         return ""
-    sent.sort(key=lambda r: int(r.get("dependent_id", 0)))
+
+    # 按照 dependent_id 的整数大小对句子中的 Token 进行严格排序
+    try:
+        sent.sort(key=lambda r: int(r.get("dependent_id", 0)))
+    except Exception:
+        pass  # 防止万一里面包含非数字导致排序崩溃
+
     word_dict = {}
     for row in sent:
-        dep_id = int(row["dependent_id"])
-        if dep_id not in word_dict:
-            word_dict[dep_id] = {
-                "id": dep_id,
-                "text": str(row.get("dependent_text", "")),
-                "upos": str(row.get("upos", "?"))
-            }
-        head_id = int(row.get("head_id", 0))
-        if head_id > 0 and head_id not in word_dict:
-            word_dict[head_id] = {"id": head_id, "text": str(row.get("head_text", "")), "upos": "?"}
+        try:
+            dep_id = int(row.get("dependent_id", 0))
+            if dep_id <= 0:
+                continue
+
+            if dep_id not in word_dict:
+                word_dict[dep_id] = {
+                    "id": dep_id,
+                    "text": str(row.get("dependent_text", "")),
+                    "upos": str(row.get("upos", "?"))
+                }
+
+            head_id = int(row.get("head_id", 0))
+            if head_id > 0 and head_id not in word_dict:
+                word_dict[head_id] = {
+                    "id": head_id,
+                    "text": str(row.get("head_text", "")),
+                    "upos": "?"
+                }
+        except (ValueError, TypeError):
+            continue  # 跳过由于特殊字符导致无法解析为数字的脏数据，保护核心图形
+
     sorted_words = sorted(word_dict.values(), key=lambda x: x["id"])
-    words_js = [f'{{id:{w["id"]},text:"{w["text"]}",pos:"{w["upos"]}"}}' for w in sorted_words]
-    deps_js  = [
-        f'{{dep:{int(r["dependent_id"])},head:{int(r["head_id"])},rel:"{r["deprel"]}"}}'
-        for r in sent
-    ]
+
+    # 转化为 JS 数组时，进行特殊字符转义，防止英文双引号 " 或单引号 ' 破坏前端 JS 语法
+    words_js = [f'{{id:{w["id"]},text:"{w["text"].replace('"', '\\"')}",pos:"{w["upos"]}"}}' for w in sorted_words]
+
+    deps_js = []
+    for r in sent:
+        try:
+            dep_val = int(r.get("dependent_id", 0))
+            head_val = int(r.get("head_id", 0))
+            rel_val = str(r.get("deprel", "dep"))
+            if dep_val > 0:
+                deps_js.append(f'{{dep:{dep_val},head:{head_val},rel:"{rel_val}"}}')
+        except (ValueError, TypeError, KeyError):
+            continue  # 安全卫士：杜绝任何 KeyError 崩溃风险
+
+    # 如果此时渲染出来的连线或词为空，优雅返回空，不引起崩盘
+    if not words_js:
+        return ""
+
     return (arc_html_template
             .replace("__WORDS__", "[" + ",".join(words_js) + "]")
-            .replace("__DEPS__",  "[" + ",".join(deps_js)  + "]"))
-
+            .replace("__DEPS__", "[" + ",".join(deps_js) + "]"))
 
 # [改动3] 用户管理：本地 JSON 用户系统全部移除，改由 auth.py 连接远程 FastAPI 认证。
 # 进度、词汇本保留在 session_state，行为日志写到 /tmp。
@@ -677,7 +842,7 @@ def compute_dep_distances(sent_deps: list) -> dict:
 #     return Path("/tmp/prism") / f"reading_behavior_{username}.jsonl"
 
 def get_behavior_log_path(username: str) -> Path:
-    return BASE_DIR / f"reading_behavior_{username}.jsonl"
+    return LOGS_DIR / f"reading_behavior_{username}.jsonl"
 # ===================================================================
 # 行为数据持久化
 # ===================================================================
@@ -762,7 +927,7 @@ def build_sentence_tokens(sentence_text: str,
                     deps_info.append({
                         "head_lemma": str(related_lemma),
                         "deprel":     str(deprel),
-                        # [Fix-D] pair 格式统一为 "word → head_lemma (deprel)"
+                        "position":   related_idx,          # ← head 词在句中的 0-based 位置，JS 高亮需要
                         "pair":       f"{word} → {related_lemma} ({deprel})",
                     })
 
@@ -854,9 +1019,9 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
             if 'deps_info' in word_data and word_data['deps_info']:
                 for dep_item in word_data['deps_info']:
                     dep_data.append({
-                        'position': dep_item.get('related_idx'),  # 对应 JS 中的 dep.position
-                        'lemma': dep_item.get('related_lemma'),
-                        'deprel': dep_item.get('deprel'),
+                        'position': dep_item.get('position'),    # head 词的 0-based 位置
+                        'lemma':    dep_item.get('head_lemma'),  # head 词的 lemma
+                        'deprel':   dep_item.get('deprel'),
                     })
             word_data_json.append({
                 'idx': idx, 'lemma': lemma, 'word': word, 'deps': dep_data
@@ -874,7 +1039,7 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
         else:
             # 将字号调整到 24px - 26px 左右，与主体视觉对齐
             html_parts.append(
-                f'<span style="color:#666666; font-size:26px; '
+                f'<span style="color:#555555; font-size:15px; '
                 f'font-family:Merriweather, serif">{html.escape(word)}</span> '
             )
 
@@ -990,73 +1155,45 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
 # 书籍选择：改用 book_registry.py，支持免费/付费分层
 # ===================================================================
 
-# ── 1. 全局核心 Session State 初始化（增加条件判定，防止频繁 Rerun 导致的重置死循环） ──
-if "is_logged_in" not in st.session_state:
-    st.session_state.is_logged_in = False
+# ── 1. 全局核心 Session State 初始化 ──
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
 
-if "username" not in st.session_state:
-    st.session_state.username = "guest"
+# ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
+render_auth_sidebar()
 
-# ⚡ [优化点1]：将状态重置函数包裹在条件门禁中，只有在首次进入或必要时才执行一次
-if "states_initialized" not in st.session_state:
-    reset_default_session_state()
-    st.session_state["states_initialized"] = True
+if not st.session_state.current_user:
+    st.info("Please log in or register in the sidebar to start reading.")
+    st.stop()  # 🛑 没登录直接熔断，安全第一
 
-# 初始化阅读行为打点所需的专用计时与缓存字典
+username = st.session_state.current_user
+
+# ── 2. 精准的状态重置 ──
+# 不要用一辈子只运行一次的 "states_initialized" 门禁！
+# 正确的做法：每次进入页面都允许它重置基础变量，确保点击新的单词时，老单词的依存残余会被洗掉
+reset_default_session_state()
+
+# ── 3. 打点计时专用，如果不存在才初始化 ──
 if "_sentence_enter_time" not in st.session_state:
     st.session_state["_sentence_enter_time"] = {}
 if "_pending_behavior_save" not in st.session_state:
     st.session_state["_pending_behavior_save"] = None
 
-
-# ── 2. 远程身份认证组件（调用 auth.py 渲染侧边栏） ──
-# 内部成功登录后，应当自动将 st.session_state.is_logged_in 设为 True，并将账号写入 st.session_state.username
-render_auth_sidebar()
-
-
-# ── 3. 全局未登录权限拦截门禁 ──
-if not st.session_state.is_logged_in or st.session_state.username == "guest":
-    st.info("👋 Welcome! Please log in or register in the sidebar to start your smart reading journey.")
-    st.stop()  # ⛔ 强行阻断下游代码渲染，保护核心内容付费墙和付费书籍资产
-
-# ── 4. 权限通过，全局变量安全派生 ──
-# 下游的所有组件（包括日志记录器、书籍展示墙）将统一且安全地调用此 username 变量
-username = st.session_state.username
-# if "current_user" not in st.session_state:
-#     st.session_state.current_user = None
-#
-# reset_default_session_state()
-#
-# if "_sentence_enter_time"   not in st.session_state:
-#     st.session_state["_sentence_enter_time"]   = {}
-# if "_pending_behavior_save" not in st.session_state:
-#     st.session_state["_pending_behavior_save"] = None
-#
-# # ── 认证（来自 auth.py，支持注册/登录/忘记密码）──
-# render_auth_sidebar()
-#
-# if not st.session_state.current_user:
-#     st.info("Please log in or register in the sidebar to start reading.")
-#     st.stop()
-#
-# username = st.session_state.current_user
-
 # ── 订阅状态 + 付款入口 ──
+
 render_subscription_sidebar()
-#sub = check_subscription()
 
-# ══════════════════════════════════════════════════════════════
-# 优化后：仅在初次登录或状态不存在时请求一次，之后点击按钮直接读内存
-# ══════════════════════════════════════════════════════════════
-# 1. 检查名为 "sub" 的缓存格子是否存在（必须加引号，代表字符串键名）
-if "sub" not in st.session_state:
-    # 2. 如果不存在，调用函数拿结果，并存入缓存（点语法 st.session_state.sub 是完全正确的）
-    st.session_state.sub = check_subscription()
+# ── 💡 优雅替代方案：使用带有 TTL（生存时间）的缓存 ──
+# 假设你在 check_subscription 定义处或者这里，将其包装为一个限时缓存函数
+# 比如每隔 60 秒才真正去请求一次服务器，既能防止点击单词时瞬间卡顿，又能保证数据是最新活着的。
 
-# 3. 从缓存中取出值，赋给本地变量 sub 供后续代码使用
-sub = st.session_state.sub
+@st.cache_data(ttl=60)  # 允许缓存 60 秒，60 秒内点击单词秒回，60 秒后自动刷新
+def get_cached_subscription(token):
+    return check_subscription()
 
-
+# 直接获取，不用再塞进 st.session_state 造成状态污染
+token = st.session_state.get("auth_token")
+sub = get_cached_subscription(token) if token else {"subscribed": False}
 # ── [改动5] 免费体验策略 ──────────────────────────────────────────
 # 注册后 14 天：全功能不限量
 # 14 天后：每天仍可免费读 3 句
@@ -1484,34 +1621,27 @@ with tab1:
     tts_audio_key = f"tts_audio_{book_name}_{display_sentence}"
 
     with tts_col1:
-        # 按钮加上 key，防止 Streamlit 在组件销毁重建时产生状态混乱
         if st.button("🔊 Play Audio", key=f"btn_tts_{book_name}_{display_sentence}"):
             with st.spinner("Generating audio..."):
                 try:
-                    # 1. 异步调用 edge-tts 生成音频
-                    # 无论当前处于何种线程/事件循环，因为顶部已经 apply 了 nest_asyncio，直接 run 绝对安全
+                    # 异步安全生成
                     mp3_path = asyncio.run(do_tts(sentence_text, tts_voice))
-
-                    # 2. ⚡ 核心安全改动：立即从物理磁盘读入内存字节流，摆脱临时文件并发控制的泥潭
-                    from pathlib import Path
-
+                    # 立即读入内存
                     audio_bytes = Path(mp3_path).read_bytes()
-
-                    # 3. 将字节流存入当前句子的专属 Session 状态中
                     st.session_state[tts_audio_key] = audio_bytes
-
-                    # 4. 尝试安全地删除刚刚产生的临时物理文件，保持服务器磁盘整洁
+                    # 磁盘清理
                     try:
                         Path(mp3_path).unlink()
                     except Exception:
                         pass
-
                 except Exception as e:
                     st.error(f"TTS generation failed: {e}")
 
-    # ✨ 状态渲染屏障：只要当前句子的音频在缓存里，就稳稳地渲染播放器，Rerun 刷新也不会消失
+    # 渲染音频播放器
     if tts_audio_key in st.session_state and st.session_state[tts_audio_key]:
         st.audio(st.session_state[tts_audio_key], format="audio/mp3")
+
+
     # tts_col1, _ = st.columns([1, 4])
     # with tts_col1:
     #     # if st.button("🔊 Play sentence", key=f"tts_{book_name}_{display_sentence}"):
@@ -2136,48 +2266,64 @@ with tab2:
 with tab3:
     st.title("🌌 Vocabulary universe")
 
-    # ── ⚡ 核心对齐修改 1：利用 O(1) 前缀和计算用户当前真正“见过”的词频计数器 ──
-    # 彻底杜绝原本“不论读到哪，都只显示全书静态死数据”的缺陷
+    # ── 1. 安全提取动态阅读词频计数器 ──
     if cumulative_mode:
-        # 累计模式：使用用户跨书籍的全局历史累计词频
         user_seen_counter = progress.get("global_counter", Counter())
     else:
-        # 单书模式：利用预计算的前缀和 + 当前句增量，瞬时(O(1))还原出用户当前的真实阅读词频进度
-        if "prefix_counters" in data and current_sentence < len(data["sentence_deltas"]):
-            # 到达当前句之前的所有累计词频缓存
-            user_seen_counter = data["prefix_counters"][current_sentence].copy()
-            # 加上当前这一句所贡献的词频
-            user_seen_counter.update(data["sentence_deltas"][current_sentence])
+        # 增加极其严格的边界防御，防止 Rerun 时 current_sentence 越界导致 App 白屏
+        prefix_counters = data.get("prefix_counters", [])
+        sentence_deltas = data.get("sentence_deltas", [])
+
+        if prefix_counters and sentence_deltas and current_sentence < len(prefix_counters):
+            try:
+                user_seen_counter = prefix_counters[current_sentence].copy()
+                if current_sentence < len(sentence_deltas):
+                    user_seen_counter.update(sentence_deltas[current_sentence])
+            except Exception:
+                user_seen_counter = Counter()
         else:
-            # 兜底逻辑
             user_seen_counter = Counter()
 
-    # 从 Session State 获取官方的标准词汇分级表（COCA等）
+    # 获取标准词汇分级表
     standard_wordlists = st.session_state.get("standard_wordlists", {})
 
-    # ── 📈 动态词汇覆盖率统计 ──
+    # ── 2. 动态词汇覆盖率统计（增强鲁棒性版） ──
     if user_seen_counter and standard_wordlists:
-        # 统一转为小写集合，用于高精度集合交集计算
-        # 只保留纯字母词，过滤标点、数字，确保和 COCA 词表对齐
+        # 清洗逻辑：去空格、转小写，但【放宽限制】，不要用 isalpha() 过滤，防止特殊标点导致和依存数据脱节
         text_lemmas = {
             str(k).lower().strip()
             for k in user_seen_counter.keys()
-            if str(k).strip().isalpha()
+            if str(k).strip()
         }
 
         st.markdown("### 📈 Vocabulary coverage statistics (Current Progress)")
         stats_cols = st.columns(4)
+
+        # 提取全书的所有词根，做安全兜底
+        global_freq = data.get("global_freq_dict", {})
+        book_lemmas = {str(k).lower().strip() for k in global_freq.keys() if str(k).strip()}
+
         for idx, (level, wl_set) in enumerate(sorted(standard_wordlists.items())):
             if idx >= 4:
                 break
-            # wl_set 已经是 set，直接求交集
-            wordlist_lemmas = wl_set
-            intersection = text_lemmas & wordlist_lemmas
 
-            # 分母：全书出现过的 COCA 词种类（而非整个 COCA 词表）
-            # 这样覆盖率表示"你已读到该级别多少比例的词"，更贴近实际阅读进度
-            book_lemmas   = {str(k).lower().strip() for k in data["global_freq_dict"].keys() if str(k).strip().isalpha()}
-            book_in_coca  = book_lemmas & wordlist_lemmas
+            # 确保 wl_set 是标准的 set 集合（防御第一段传递 DataFrame 的历史遗留 Bug）
+            if isinstance(wl_set, dict):
+                wordlist_lemmas = set(wl_set.keys())
+            elif isinstance(wl_set, set):
+                wordlist_lemmas = wl_set
+            else:
+                # 如果依然是 DataFrame，进行紧急转换防护
+                try:
+                    wordlist_lemmas = set(wl_set['lemma'].str.lower())
+                except Exception:
+                    wordlist_lemmas = set()
+
+            # 计算交集
+            intersection = text_lemmas & wordlist_lemmas
+            book_in_coca = book_lemmas & wordlist_lemmas
+
+            # 计算覆盖率
             coverage = (len(intersection) / len(book_in_coca) * 100 if book_in_coca else 0)
 
             with stats_cols[idx]:
