@@ -245,9 +245,8 @@ def render_subscription_sidebar():
 
         # 已订阅用户：显示联系支持入口
         with st.sidebar.expander("Manage subscription"):
-            st.write(
-                "To cancel or get a refund, "
-                "please contact us with your Gumroad order email:")
+            st.write(""" **Prism Premium Pass** Our order process is conducted by our online reseller **Paddle.com**. Paddle is the Merchant of Record for all our orders. To cancel your subscription or request a refund, please contact Paddle support directly, or reach out to us with your billing details at: """
+                )
             st.code("support@syntax-master.com")  # ★ 填你的支持邮箱
 
     else:

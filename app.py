@@ -6,7 +6,7 @@
 #   [改动3] 用户系统替换为远程 FastAPI 认证（auth）
 #   [改动4] 侧边栏书籍选择改为从 book_registry 动态生成，支持免费/付费分层
 #   [改动5] 免费体验策略：注册后14天全功能免费，到期后每天3句
-
+import os
 import streamlit as st
 import streamlit.components.v1 as components
 # pandas 已完全移除，改用原生 Python + SQLite
@@ -1157,7 +1157,7 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
 
 # ── 1. 全局核心 Session State 初始化 ──
 if "current_user" not in st.session_state:
-    st.session_state.current_user = None
+    st.session_state.current_user = True
 
 # ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
 render_auth_sidebar()
@@ -2792,10 +2792,10 @@ with tab3:
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button(
-                label="⬇ Download full JSONL",
-                data=log_path.read_bytes(),
-                file_name=f"reading_behavior_{username}.jsonl",
-                mime="application/jsonl",
+                label = "⬇ Download full JSONL",
+                data = LOGS_DIR.read_bytes(),
+                file_name = f"reading_behavior_{username}.jsonl",
+                mime = "application/jsonl",
             )
         with dl_col2:
             csv_buf = dwell_df.to_csv(index=False).encode()
