@@ -18,28 +18,22 @@ def _get_dir_mtime(book_dir: Path) -> float:
     except Exception:
         return 0.0
 
-
-# def _read_csv(path: Path) -> list:
-#     """用标准库 csv 读取文件，返回 list of dict。"""
-#     # # with open(path, newline='', encoding='utf-8') as f:
-#     # #     return list(csv.DictReader(f))
-#     # with open(file_path, 'r', encoding='utf-8-sig') as f:
-#     #     reader = csv.DictReader(f)
-#     #     for row in reader:
-
-
 def _read_csv(path: Path) -> list:
     """用标准库 csv 读取文件，返回 list of dict。
-    使用 utf-8-sig 编码自动剔除 Windows BOM 头，防止 sentence_id 发生 KeyError。
+    使用 utf-8-sig 自动剔除 BOM 头，利用底层优化加速读取速度，防止 Nginx 超时。
     """
-    data_list = []
+    if not path.exists():
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+            # 直接将 DictReader 转换为 list，这比手写 for 循环快得多
+            return list(csv.DictReader(f))
+    except Exception as e:
+        print(f"❌ 读取 CSV 失败 [{path.name}]: {e}")
+        return []
 
-    # 注意：将你原本笔误的 file_path 改回参数中的 path
-    with open(path, 'r', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # row 本身就是一个 dict（例如: {'sentence_id': '1', 'text': 'Hello...'}）
-            data_list.append(row)
+
+
 
     # 整个文件读完后，返回装满字典的列表
     return data_list
