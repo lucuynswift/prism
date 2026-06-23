@@ -6,6 +6,19 @@ from pathlib import Path
 from collections import Counter, defaultdict
 
 
+def _get_dir_mtime(book_dir: Path) -> float:
+    """
+    返回书籍目录下所有 CSV 文件的最新修改时间戳。
+    作为 load_book_from_server 的缓存失效依据：
+    服务器文件更新后，mtime 变化 → 缓存自动重建，无需重启 Streamlit。
+    """
+    try:
+        mtimes = [f.stat().st_mtime for f in Path(book_dir).glob("*.csv")]
+        return max(mtimes) if mtimes else 0.0
+    except Exception:
+        return 0.0
+
+
 # def _read_csv(path: Path) -> list:
 #     """用标准库 csv 读取文件，返回 list of dict。"""
 #     # # with open(path, newline='', encoding='utf-8') as f:
@@ -35,12 +48,12 @@ def _read_csv(path: Path) -> list:
 
 
 @st.cache_resource(show_spinner="⚡ Loading precomputed book vectors...")
-def load_book_from_server(slug: str, repo_url: str) -> dict:
+def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict:
     """
-    高性能书籍加载器。
-    完全使用原生 Python（csv + collections），不依赖 pandas。
-    返回结构与原版完全一致，app.py 的调用方无需改动键名。
+    _mtime 以下划线开头，Streamlit 不将其纳入缓存键比较，
+    但调用方每次传入最新的文件修改时间，值变化时强制触发缓存重建。
     """
+    # 高性能书籍加载器：原生 Python（csv + collections），不依赖 pandas。
     book_dir = Path(repo_url)
 
     # ── 1. 读取三张核心 CSV ──

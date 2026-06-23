@@ -57,7 +57,7 @@ import nest_asyncio
 nest_asyncio.apply()  # 👈 全局只需在程序启动时注入一次，彻底根治所有 asyncio.run 死锁
 # [改动1] 正式部署新增：认证、数据加载、书单三个本地模块
 from auth import render_auth_sidebar, render_subscription_sidebar, check_subscription
-from data_loader import load_book_from_server
+from data_loader import load_book_from_server, _get_dir_mtime
 from book_registry import BOOK_REGISTRY
 from db import init_db, insert_record, query_records
 
@@ -1145,8 +1145,10 @@ if not sub["subscribed"] and not in_trial and daily_count >= FREE_DAILY_LIMIT:
     st.stop()
 
 # 从服务器加载书籍数据
+# _mtime 让缓存感知服务器文件更新，上传新数据后无需重启即可生效
 with st.spinner(f"Loading {book_choice}…"):
-    data = load_book_from_server(book_name, book_info["repo"])
+    _book_mtime = _get_dir_mtime(Path(book_info["repo"]))
+    data = load_book_from_server(book_name, book_info["repo"], _mtime=_book_mtime)
 
 if not data:
     st.error("Failed to load book data. Please try again later.")

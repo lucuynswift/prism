@@ -67,11 +67,12 @@ def render_auth_sidebar():
         if st.sidebar.button("Log out"):
             st.session_state["current_user"] = None
             st.session_state["auth_token"]   = None
-            st.session_state["is_logged_in"] = False  # ← 新增
-            st.session_state["username"] = "guest"  # ← 新增
+            # ── 同步重置 app.py 门禁依赖的两个键 ──
+            st.session_state["is_logged_in"] = False
+            st.session_state["username"]     = "guest"
             st.session_state.pop("_subscription_cache",      None)
             st.session_state.pop("_subscription_cache_time", None)
-            st.session_state.pop("sub", None)  # 如果你换成了 sub
+            st.session_state.pop("sub", None)
             st.rerun()
         return
 
@@ -90,11 +91,9 @@ def render_auth_sidebar():
                 if ok:
                     st.session_state["current_user"] = data["username"]
                     st.session_state["auth_token"]   = data["token"]
-
-                    # ── 新增：同步 app.py 依赖的两个键 ──
+                    # ── 同步 app.py 门禁依赖的两个键 ──
                     st.session_state["is_logged_in"] = True
-                    st.session_state["username"] = data["username"]
-
+                    st.session_state["username"]     = data["username"]
                     st.rerun()
                 else:
                     st.error(data.get("detail", "Login failed."))
