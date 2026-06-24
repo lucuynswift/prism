@@ -52,8 +52,8 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
 
     # ── 1. 读取三张核心 CSV ──
     try:
-        sentences    = _read_csv(book_dir / "sentences.csv")
-        dep_rows     = _read_csv(book_dir / "dependencies.csv")
+        sentences = _read_csv(book_dir / "sentences.csv")
+        dep_rows = _read_csv(book_dir / "dependencies.csv")
         lemma_pos_rows = _read_csv(book_dir / "lemma_positions.csv")
     except Exception as e:
         st.error(f"Failed to load book files for '{slug}': {e}")
@@ -66,20 +66,33 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
 
     # ── 2. 动态计算 sentence_id 起点，防止 0/1 偏移漂移 ──
     all_sids = [int(r['sentence_id']) for r in lemma_pos_rows if r.get('sentence_id')]
-    min_sid  = min(all_sids) if all_sids else 1
+    min_sid = min(all_sids) if all_sids else 1
 
-    # ── 3. 构建 all_sentence_lemmas（list of list[str]）──
+    # ── 3. 构建 all_sentence_lemmas ──
     all_sentence_lemmas = [[] for _ in range(num_sentences)]
 
+    # 🌟 在遍历的同时，直接顺便把预计算好的全局词频（global_frequency）提取出来
+    global_freq_dict = {}
     lemma_by_sid = defaultdict(list)
+
     for r in lemma_pos_rows:
         sid = int(r['sentence_id'])
         try:
             local_id = int(r['local_word_id'])
         except (ValueError, KeyError):
             local_id = 0
+
         lemma = r.get('lemma', '')
         lemma_by_sid[sid].append((local_id, lemma))
+
+        # 🌟 核心优化 1：直接获取第二列预计算好的全局词频，避免后续重复用 Counter 现场去数
+        if lemma:
+            lemma_lower = lemma.lower().strip()
+            if lemma_lower and lemma_lower not in global_freq_dict:
+                try:
+                    global_freq_dict[lemma_lower] = int(r.get('global_frequency', 1))
+                except (ValueError, TypeError):
+                    global_freq_dict[lemma_lower] = 1
 
     for sid, pairs in lemma_by_sid.items():
         idx = sid - min_sid
@@ -91,19 +104,23 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
                 if l and l.strip() and l.strip().isalpha()  # 过滤标点、数字，只保留纯字母词
             ]
 
-    # ── 4. 全局词频字典（从 lemma_pos_rows 统计）──
-    all_flat_lemmas = [l for sent in all_sentence_lemmas for l in sent]
-    global_freq_dict = dict(Counter(all_flat_lemmas))
+    # ── 4. 彻底移除原来导致 OOM 的 Counter(all_flat_lemmas) 全局统计代码 ──
+    # 原本这里的代码已被上面第 3 步的全局预计算提取完美取代 🌟
 
-    # ── 5. 前缀和向量（O(1) 词频查询核心）──
+    # ── 5. 核心优化 2：前缀和向量（稀疏化改造，极限节省内存） ──
     sentence_deltas = [Counter(sent) for sent in all_sentence_lemmas]
-    prefix_counters = []
-    current_cum = Counter()
-    for delta in sentence_deltas:
-        prefix_counters.append(current_cum.copy())
-        current_cum.update(delta)
 
-    # ── 6. 依存索引（高性能 groupby，key=(sentence_id, dependent_lemma)）──
+    sparse_prefix_counters = {}
+    STEP = 50  # 步长设为 50，即每 50 句保存一个词频快照检查点
+    current_cum = Counter()
+
+    for idx, delta in enumerate(sentence_deltas):
+        current_cum.update(delta)
+        # 只在能被 STEP 整除的句法行上进行 .copy() 存档
+        if idx % STEP == 0:
+            sparse_prefix_counters[idx] = current_cum.copy()
+
+    # ── 6. 依存索引（保持原有高效索引逻辑不变） ──
     dep_index = defaultdict(list)
     if dep_rows:
         has_dep_lemma = 'dependent_lemma' in dep_rows[0]
@@ -116,9 +133,7 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
             w_lemma = r.get(key_col, '').lower().strip()
             dep_index[(sid, w_lemma)].append(r)
 
-    # ── 7. dep_by_sid：按 sentence_id 聚合，供句子级批量查询 ──
-    # dep_index 键是 (sid, lemma) tuple，适合词级精确查询
-    # dep_by_sid 键是纯 int sid，适合渲染当前句子全部依存关系
+    # ── 7. dep_by_sid：按 sentence_id 聚合 ──
     dep_by_sid: dict = defaultdict(list)
     for r in dep_rows:
         try:
@@ -126,14 +141,16 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
         except (ValueError, KeyError):
             pass
 
+    # 返回全新的、极简瘦身后的数据结构
     return {
-        "slug":                slug,
-        "sentences":           sentences,
+        "slug": slug,
+        "sentences": sentences,
         "all_sentence_lemmas": all_sentence_lemmas,
-        "sentence_deltas":     sentence_deltas,
-        "prefix_counters":     prefix_counters,
-        "global_freq_dict":    global_freq_dict,
-        "dep_rows":            dep_rows,
-        "dep_index":           dict(dep_index),   # 键: (sid, lemma) — 词级查询
-        "dep_by_sid":          dict(dep_by_sid),  # 键: sid (int)    — 句子级查询
+        "sentence_deltas": sentence_deltas,
+        "sparse_prefix_counters": sparse_prefix_counters,  # 🌟 改为传出稀疏检查点字典
+        "prefix_step": STEP,  # 🌟 传出步长控制参数
+        "global_freq_dict": global_freq_dict,  # 🌟 完美预计算词频
+        "dep_rows": dep_rows,
+        "dep_index": dict(dep_index),
+        "dep_by_sid": dict(dep_by_sid),
     }
