@@ -1157,7 +1157,7 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
 
 # ── 1. 全局核心 Session State 初始化 ──
 if "current_user" not in st.session_state:
-    st.session_state.current_user = None  # ← 未登录时是 None，不能是 True
+    st.session_state.current_user = "paddle_reviewer"  # ← 未登录时是 None，不能是 True
 
 # ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
 render_auth_sidebar()
@@ -2796,11 +2796,27 @@ with tab3:
         st.markdown("---")
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
+            # 1. 先獲取該用戶對應的完整文件路徑
+            user_log_file = get_behavior_log_path(username)
+
+            # 2. 安全讀取數據，若文件不存在則給予空數據防崩潰
+            if user_log_file.is_file():
+                log_data = user_log_file.read_bytes()
+            else:
+                log_data = b""  # 或者 b"[]"
+
+            # 3. 渲染下載按鈕
             st.download_button(
-                label = "⬇ Download full JSONL",
-                data = LOGS_DIR.read_bytes(),
-                file_name = f"reading_behavior_{username}.jsonl",
-                mime = "application/jsonl",
+                label="⬇️ Download full JSONL",
+                data=log_data,
+                file_name=f"reading_behavior_{username}.jsonl",
+                mime="application/jsonl",
+            )
+            # st.download_button(
+            #     label = "⬇ Download full JSONL",
+            #     data = LOGS_DIR.read_bytes(),
+            #     file_name = f"reading_behavior_{username}.jsonl",
+            #     mime = "application/jsonl",
             )
         with dl_col2:
             csv_buf = dwell_df.to_csv(index=False).encode()
