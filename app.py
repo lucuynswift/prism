@@ -24,6 +24,8 @@ import secrets
 import edge_tts
 import tempfile
 from pathlib import Path
+import io
+import csv
 # 🔍 补上这行：定义服务器上存放词汇表（COCA等）的绝对路径
 #WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
 # ==================== 路径配置块 ====================
@@ -1352,13 +1354,30 @@ with tab1:
     if view_key not in st.session_state:
         st.session_state[view_key] = 0
 
+    # if pending_key in st.session_state:
+    #     target = st.session_state.pop(pending_key)
+    #     target = max(0, min(target, max_view))
+    #     st.session_state[view_key]   = target
+    #     st.session_state[slider_key] = target
+    #     st.session_state["_sentence_enter_time"][(book_name, target)] = time.time()
     if pending_key in st.session_state:
         target = st.session_state.pop(pending_key)
-        target = max(0, min(target, max_view))
-        st.session_state[view_key]   = target
+        # Unlock jumping forward by using total_sentences instead of max_view
+        target = max(0, min(target, total_sentences - 1))
+        st.session_state[view_key] = target
         st.session_state[slider_key] = target
-        st.session_state["_sentence_enter_time"][(book_name, target)] = time.time()
 
+        # Expand max_view so the slider territory unlocks properly
+        if cumulative_mode:
+            if target > current_sentence:
+                st.session_state[book_progress_key] = target
+                save_progress()
+        else:
+            if target > book_progress["current_sentence"]:
+                book_progress["current_sentence"] = target
+                save_progress()
+
+        st.session_state["_sentence_enter_time"][(book_name, target)] = time.time()
     if st.session_state[view_key] > max_view:
         st.session_state[view_key] = max_view
     if st.session_state.get(slider_key, 0) > max_view:
@@ -1945,53 +1964,107 @@ function copyText2(){{_doCopy();}}
                 save_progress()
                 st.rerun()
 
+    # with ctrl_col2:
+    #     # ✨ 【核心新增：跳读输入框】
+    #     # 显示给用户 1-based (从 1 开始的序号)，后台自动转换对齐到 0-based 数组
+    #     max_valid_idx = int(total_sentences)
+    #     display_idx = display_sentence + 1
+    #
+    #     target_sentence_1based = st.number_input(
+    #         label="🎯 Jump to Sentence:",
+    #         min_value=1,
+    #         max_value=max_valid_idx,
+    #         value=int(display_idx),
+    #         step=1,
+    #         label_visibility="collapsed",  # 隐藏上方的多余提示文字，保持排版精简
+    #         key=f"jump_input_{book_name}"  # ← key 不含 display_sentence，避免每次跳转后 key 变化导致组件重置死循环
+    #     )
+    #
+    #     # 💡 联动监听：如果用户输入的页码发生了改变（代表敲击了回车或按了加减）
+    #     target_sentence_0based = target_sentence_1based - 1
+    #     if target_sentence_0based != display_sentence:
+    #         leave_time = time.time()
+    #         enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
+    #         dwell_secs = round(leave_time - enter_time, 2)
+    #
+    #         # ⚡ 完美融入：跳读时也生成一条对应的行为日志，并将 trigger 标记为 "jump_input"
+    #         behavior_record = {
+    #             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    #             "username": username,
+    #             "book": book_name,
+    #             "sentence_idx": display_sentence,
+    #             "sentence_id": int(sentence_id),
+    #             "word_count": sentence_word_count,
+    #             "mdd": dep_dist_info["mdd"],
+    #             "max_dd": dep_dist_info["max_dd"],
+    #             "dep_pairs": dep_dist_info["dep_pairs"],
+    #             "dwell_seconds": dwell_secs,
+    #             "trigger": f"jump_to_{target_sentence_1based}",  # 动态记录跳读目标，极其利于后续科研行为分析
+    #             "click_log": current_click_log,
+    #         }
+    #         st.session_state["_pending_behavior_save"] = behavior_record
+    #         st.session_state.pop(click_cache_key, None)
+    #         st.session_state["_sentence_enter_time"].pop(enter_key, None)
+    #
+    #         # 变更进度指针并保存刷新
+    #         st.session_state[pending_key] = target_sentence_0based
+    #         save_progress()
+    #         st.rerun()
+        # Define callback right above the columns to handle jump input cleanly
+        def on_jump_input():
+            st.session_state["_pending_jump_target"] = st.session_state[f"jump_input_{book_name}"] - 1
+
+
     with ctrl_col2:
         # ✨ 【核心新增：跳读输入框】
-        # 显示给用户 1-based (从 1 开始的序号)，后台自动转换对齐到 0-based 数组
         max_valid_idx = int(total_sentences)
         display_idx = display_sentence + 1
+        jump_key = f"jump_input_{book_name}"
+
+        # 1. Process pending jump triggered by the callback
+        if "_pending_jump_target" in st.session_state:
+            target_sentence_0based = st.session_state.pop("_pending_jump_target")
+            if target_sentence_0based != display_sentence:
+                leave_time = time.time()
+                enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
+                dwell_secs = round(leave_time - enter_time, 2)
+
+                # ⚡ 完美融入：跳读时也生成一条对应的行为日志
+                behavior_record = {
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "username": username,
+                    "book": book_name,
+                    "sentence_idx": display_sentence,
+                    "sentence_id": int(sentence_id),
+                    "word_count": sentence_word_count,
+                    "mdd": dep_dist_info["mdd"],
+                    "max_dd": dep_dist_info["max_dd"],
+                    "dep_pairs": dep_dist_info["dep_pairs"],
+                    "dwell_seconds": dwell_secs,
+                    "trigger": f"jump_to_{target_sentence_0based + 1}",
+                    "click_log": current_click_log,
+                }
+                st.session_state["_pending_behavior_save"] = behavior_record
+                st.session_state.pop(click_cache_key, None)
+                st.session_state["_sentence_enter_time"].pop(enter_key, None)
+
+                st.session_state[pending_key] = target_sentence_0based
+                save_progress()
+                st.rerun()
+
+        # 2. Prevent widget state desync when display_idx is changed externally (e.g. Next/Prev/Slider)
+        if jump_key not in st.session_state or st.session_state[jump_key] != display_idx:
+            st.session_state[jump_key] = int(display_idx)
 
         target_sentence_1based = st.number_input(
             label="🎯 Jump to Sentence:",
             min_value=1,
             max_value=max_valid_idx,
-            value=int(display_idx),
             step=1,
-            label_visibility="collapsed",  # 隐藏上方的多余提示文字，保持排版精简
-            key=f"jump_input_{book_name}"  # ← key 不含 display_sentence，避免每次跳转后 key 变化导致组件重置死循环
+            label_visibility="collapsed",
+            key=jump_key,
+            on_change=on_jump_input
         )
-
-        # 💡 联动监听：如果用户输入的页码发生了改变（代表敲击了回车或按了加减）
-        target_sentence_0based = target_sentence_1based - 1
-        if target_sentence_0based != display_sentence:
-            leave_time = time.time()
-            enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
-            dwell_secs = round(leave_time - enter_time, 2)
-
-            # ⚡ 完美融入：跳读时也生成一条对应的行为日志，并将 trigger 标记为 "jump_input"
-            behavior_record = {
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "username": username,
-                "book": book_name,
-                "sentence_idx": display_sentence,
-                "sentence_id": int(sentence_id),
-                "word_count": sentence_word_count,
-                "mdd": dep_dist_info["mdd"],
-                "max_dd": dep_dist_info["max_dd"],
-                "dep_pairs": dep_dist_info["dep_pairs"],
-                "dwell_seconds": dwell_secs,
-                "trigger": f"jump_to_{target_sentence_1based}",  # 动态记录跳读目标，极其利于后续科研行为分析
-                "click_log": current_click_log,
-            }
-            st.session_state["_pending_behavior_save"] = behavior_record
-            st.session_state.pop(click_cache_key, None)
-            st.session_state["_sentence_enter_time"].pop(enter_key, None)
-
-            # 变更进度指针并保存刷新
-            st.session_state[pending_key] = target_sentence_0based
-            save_progress()
-            st.rerun()
-
     with ctrl_col3:
         # 在中间两列之间，优雅地居中打印当前进度百分比
         progress_pct = ((display_sentence + 1) / total_sentences) * 100
@@ -2610,7 +2683,9 @@ with tab3:
         _dwells  = [r["dwell_ms"] for r in dwell_df if r.get("dwell_ms") is not None]
         _clicks  = [r["clicks"]   for r in dwell_df if r.get("clicks")   is not None]
         _mdds    = [r["mdd"]      for r in dwell_df if r.get("mdd")      is not None]
-        m2.metric("Avg dwell (ms)",   f"{sum(_dwells)/len(_dwells):.0f}" if _dwells else "—")
+        avg_dwell = sum(_dwells) / len(_dwells) if len(_dwells) > 0 else 0
+        m2.metric("Avg dwell (ms)", f"{avg_dwell:.0f}" if _dwells else "—")
+        #m2.metric("Avg dwell (ms)",   f"{sum(_dwells)/len(_dwells):.0f}" if _dwells else "—")
         m3.metric("Total clicks",     sum(_clicks))
         m4.metric("Unique words clicked", len(word_df))
         m5.metric("Avg MDD",          f"{sum(_mdds)/len(_mdds):.2f}" if _mdds else "—")
@@ -2667,7 +2742,7 @@ with tab3:
             else:
                 st.markdown(f"**{len(word_df)} unique words clicked**")
                 fig = px.bar(
-                    word_df.head(30), x="word", y="clicks",
+                    word_df[:30], x="word", y="clicks",
                     color="avg_dwell_ms", color_continuous_scale="Purples",
                     hover_data=["avg_dwell_ms", "total_dwell_ms"],
                     labels={"word": "Word", "clicks": "Click count",
@@ -2693,7 +2768,7 @@ with tab3:
             else:
                 st.markdown(f"**{len(deprel_df)} dependency relation types triggered**")
                 fig = px.bar(
-                    deprel_df.head(25), x="deprel", y="clicks",
+                    deprel_df[:25], x="deprel", y="clicks",
                     color="avg_dwell_ms", color_continuous_scale="Teal",
                     hover_data=["label", "avg_dwell_ms", "total_dwell_ms"],
                     labels={"deprel": "Relation", "clicks": "Click count",
@@ -2817,11 +2892,35 @@ with tab3:
             #     data = LOGS_DIR.read_bytes(),
             #     file_name = f"reading_behavior_{username}.jsonl",
             #     mime = "application/jsonl",
-            )
+            #)
+        # with dl_col2:
+        #     csv_buf = dwell_df.to_csv(index=False).encode()
+        #     st.download_button(
+        #         label="⬇ Download summary CSV",
+        #         data=csv_buf,
+        #         file_name=f"reading_summary_{username}.csv",
+        #         mime="text/csv",
+        #     )
         with dl_col2:
-            csv_buf = dwell_df.to_csv(index=False).encode()
+            # 1. 建立內存緩衝區
+            csv_output = io.StringIO()
+
+            # 2. 定義 CSV 的表頭欄位（必須和 dwell_df 裡的字典鍵名完全一致）
+            fieldnames = ["sentence_idx", "sentence_id", "word_count", "dwell_ms", "mdd", "max_dd", "trigger", "clicks"]
+
+            writer = csv.DictWriter(csv_output, fieldnames=fieldnames)
+            writer.writeheader()  # 寫入表頭
+
+            # 3. 安全寫入原生 list 數據
+            if dwell_df and isinstance(dwell_df, list):
+                writer.writerows(dwell_df)
+
+            csv_buf = csv_output.getvalue().encode('utf-8')
+            csv_output.close()
+
+            # 4. 渲染下載按鈕
             st.download_button(
-                label="⬇ Download summary CSV",
+                label="⬇️ Download summary CSV",
                 data=csv_buf,
                 file_name=f"reading_summary_{username}.csv",
                 mime="text/csv",
