@@ -1157,7 +1157,7 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
 
 # ── 1. 全局核心 Session State 初始化 ──
 if "current_user" not in st.session_state:
-    st.session_state.current_user = True
+    st.session_state.current_user = None  # ← 未登录时是 None，不能是 True
 
 # ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
 render_auth_sidebar()
@@ -1167,6 +1167,11 @@ if not st.session_state.current_user:
     st.stop()  # 🛑 没登录直接熔断，安全第一
 
 username = st.session_state.current_user
+
+# ── 守卫：username 必须是有效字符串，防止 True/None 写坏数据库 ──
+if not isinstance(username, str) or not username.strip():
+    st.info("Please log in or register in the sidebar to start reading.")
+    st.stop()
 
 # ── 2. 精准的状态重置 ──
 # 不要用一辈子只运行一次的 "states_initialized" 门禁！
@@ -1953,7 +1958,7 @@ function copyText2(){{_doCopy();}}
             value=int(display_idx),
             step=1,
             label_visibility="collapsed",  # 隐藏上方的多余提示文字，保持排版精简
-            key=f"jump_input_v3_{book_name}_{display_sentence}"
+            key=f"jump_input_{book_name}"  # ← key 不含 display_sentence，避免每次跳转后 key 变化导致组件重置死循环
         )
 
         # 💡 联动监听：如果用户输入的页码发生了改变（代表敲击了回车或按了加减）

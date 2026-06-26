@@ -161,7 +161,7 @@ BOOK_REGISTRY = {
     },
     "The Old Wives' Tale — Arnold Bennett": {
         "slug": "The Old Wives' Tale",
-        "repo": "/opt/prism/app/books/The Old Wives_ Tale",
+        "repo": "/opt/prism/app/books/The Old Wives' Tale",
         "description": "A life-spanning drama tracing the lives of two starkly different sisters.",
         "free": True,
     },
