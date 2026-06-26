@@ -2795,7 +2795,7 @@ with tab3:
             else:
                 st.markdown(f"**{len(pair_df)} unique dependency pairs triggered**")
                 fig = px.bar(
-                    pair_df.head(25), x="pair", y="clicks",
+                    pair_df[:25], x="pair", y="clicks",
                     color="avg_dwell_ms", color_continuous_scale="Blues",
                     hover_data=["word", "head_lemma", "deprel", "avg_dwell_ms"],
                     labels={"pair": "Pair", "clicks": "Click count",
