@@ -80,6 +80,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 import asyncio
 import nest_asyncio
 
+
 nest_asyncio.apply()  # 👈 全局只需在程序启动时注入一次，彻底根治所有 asyncio.run 死锁
 # [改动1] 正式部署新增：认证、数据加载、书单三个本地模块
 from auth import render_auth_sidebar, render_subscription_sidebar, check_subscription
@@ -90,7 +91,26 @@ from db import init_db, insert_record, query_records
 # 启动时初始化 SQLite 数据库（幂等，已存在则跳过）
 init_db()
 
+# 1. 初始化会话状态，确保每个新用户/新连接只记录一次
+if 'logged' not in st.session_state:
+    st.session_state['logged'] = True
 
+    # 2. 编写记录日志的逻辑（比如写入本地文件或数据库）
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open("activity_log.txt", "a") as f:
+        f.write(f"[{current_time}] 有新用户访问了页面！\n")
+import edge_tts
+# 💡 在这里粘贴缺失的 do_tts 函数定义
+async def do_tts(text: str, voice: str = "en-US-ChristopherNeural") -> bytes:
+    """
+    使用 edge_tts 将文本转换为 MP3 音频的二进制数据流
+    """
+    communicate = edge_tts.Communicate(text, voice)
+    audio_bytes = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_bytes += chunk["data"]
+    return audio_bytes
 # ------------------- 依存标签英文注释 -------------------
 DEPREL_LABELS = {
     "nsubj": "subject",
