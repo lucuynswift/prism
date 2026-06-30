@@ -100,17 +100,25 @@ if 'logged' not in st.session_state:
     with open("activity_log.txt", "a") as f:
         f.write(f"[{current_time}] 有新用户访问了页面！\n")
 import edge_tts
-# 💡 在这里粘贴缺失的 do_tts 函数定义
-async def do_tts(text: str, voice: str = "en-US-ChristopherNeural") -> bytes:
+
+
+
+async def do_tts(text: str, voice: str = "en-US-ChristopherNeural") -> str:
     """
-    使用 edge_tts 将文本转换为 MP3 音频的二进制数据流
+    使用 edge_tts 生成语音并保存到临时文件，返回该文件的【路径字符串】
     """
+    import tempfile
+    import edge_tts
+
+    # 1. 创建一个安全的临时文件，获取它的绝对路径字符串
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+        tmp_path = tmp_file.name
+
+    # 2. 实例化 edge_tts 并使用自带的 .save() 方法直接将音频写入该路径
     communicate = edge_tts.Communicate(text, voice)
-    audio_bytes = b""
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_bytes += chunk["data"]
-    return audio_bytes
+    await communicate.save(tmp_path)
+
+    return tmp_path  # 👈 返回的是字符串路径，例如 "/tmp/tmpxyz123.mp3"
 # ------------------- 依存标签英文注释 -------------------
 DEPREL_LABELS = {
     "nsubj": "subject",
@@ -576,7 +584,7 @@ def get_word_dependencies(clicked_word: str, current_sentence_id: int, dep_rows:
         if key not in seen:
             seen.add(key)
             unique_results.append(pair)
-    unique_pairs.sort(key=lambda x: x['sentence_id'])
+    unique_results.sort(key=lambda x: x['sentence_id'])
     return unique_results
 
 # ------------------- 依存弧线 HTML 模板 -------------------
@@ -749,7 +757,12 @@ def generate_dep_arc_html(dep_rows: list, sentence_id: int) -> str:
     sorted_words = sorted(word_dict.values(), key=lambda x: x["id"])
 
     # 转化为 JS 数组时，进行特殊字符转义，防止英文双引号 " 或单引号 ' 破坏前端 JS 语法
-    words_js = [f'{{id:{w["id"]},text:"{w["text"].replace('"', '\\"')}",pos:"{w["upos"]}"}}' for w in sorted_words]
+    #words_js = [f'{{id:{w["id"]},text:"{w["text"].replace('"', '\\"')}",pos:"{w["upos"]}"}}' for w in sorted_words]
+    # ✅ 修复：将引号嵌套拆开处理，彻底杜绝 SyntaxError
+    words_js = []
+    for w in sorted_words:
+        clean_text = w["text"].replace('"', '\\"')
+        words_js.append(f'{{id:{w["id"]},text:"{clean_text}",pos:"{w["upos"]}"}}')
 
     deps_js = []
     for r in sent:
@@ -1660,32 +1673,31 @@ with tab1:
 
     # ── TTS ──
 
-    # ── TTS 语音朗读模块 ──
+    # ── TTS 语音朗读模块（高效磁盘缓存+极省内存版） ──
     tts_col1, _ = st.columns([1, 4])
-    tts_audio_key = f"tts_audio_{book_name}_{display_sentence}"
-    tts_voice = "en-US-ChristopherNeural"  # 微软 Edge 优质美音男声（也可以用 en-US-EmmaNeural 女声）
-    with tts_col1:
 
+    # 💡 优化 1：session_state 里只需要存音频文件的【路径字符串】，极省服务器内存！
+    tts_path_key = f"tts_path_{book_name}_{display_sentence}"
+    tts_voice = "en-US-ChristopherNeural"
+
+    with tts_col1:
         if st.button("🔊 Play Audio", key=f"btn_tts_{book_name}_{display_sentence}"):
             with st.spinner("Generating audio..."):
                 try:
-                    # 异步安全生成
+                    import asyncio  # 确保顶层或这里导入了 asyncio
+
+                    # 💡 优化 2：运行异步函数。如果是MD5缓存版，这里对于读过的句子会“秒回”本地路径
                     mp3_path = asyncio.run(do_tts(sentence_text, tts_voice))
-                    # 立即读入内存
-                    audio_bytes = Path(mp3_path).read_bytes()
-                    st.session_state[tts_audio_key] = audio_bytes
-                    # 磁盘清理
-                    try:
-                        Path(mp3_path).unlink()
-                    except Exception:
-                        pass
+
+                    # 💡 优化 3：仅将路径字符串持久化，拒绝大二进制流塞爆内存
+                    st.session_state[tts_path_key] = mp3_path
+
                 except Exception as e:
                     st.error(f"TTS generation failed: {e}")
 
-    # 渲染音频播放器
-    if tts_audio_key in st.session_state and st.session_state[tts_audio_key]:
-        st.audio(st.session_state[tts_audio_key], format="audio/mp3")
-
+    # 💡 优化 4：渲染音频播放器。直接把路径传给 st.audio，Streamlit 会自动在前后端高效传输
+    if tts_path_key in st.session_state and st.session_state[tts_path_key]:
+        st.audio(st.session_state[tts_path_key], format="audio/mp3")
 
     # tts_col1, _ = st.columns([1, 4])
     # with tts_col1:
