@@ -1663,8 +1663,9 @@ with tab1:
     # ── TTS 语音朗读模块 ──
     tts_col1, _ = st.columns([1, 4])
     tts_audio_key = f"tts_audio_{book_name}_{display_sentence}"
-
+    tts_voice = "en-US-ChristopherNeural"  # 微软 Edge 优质美音男声（也可以用 en-US-EmmaNeural 女声）
     with tts_col1:
+
         if st.button("🔊 Play Audio", key=f"btn_tts_{book_name}_{display_sentence}"):
             with st.spinner("Generating audio..."):
                 try:
