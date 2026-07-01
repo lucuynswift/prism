@@ -6,17 +6,21 @@
 import streamlit.components.v1 as components
 import os
 
-_RELEASE = True  # 改成 False 可在本地用 npm run start 调试
+# 💡 确保你在定义组件时，使用的是服务器上的绝对路径，指向你刚才放 index.html 的 build 目录
+_RELEASE = True
 
-if _RELEASE:
-    _component_func = components.declare_component(
-        "word_interaction",
-        path=os.path.join(os.path.dirname(__file__), "frontend/build")
-    )
-else:
+if not _RELEASE:
     _component_func = components.declare_component(
         "word_interaction",
         url="http://localhost:3001",
+    )
+else:
+    # 🌟 核心修改点：显式指向服务器存放 build 静态资源的绝对路径
+    absolute_build_path = "/opt/prism/app/components/word_interaction/frontend/build"
+
+    _component_func = components.declare_component(
+        "word_interaction",
+        path=absolute_build_path
     )
 
 def word_interaction_panel(tokens, dep_map, sentence_id, key=None):
