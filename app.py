@@ -1003,10 +1003,15 @@ def _build_click_event(token: dict, dwell_ms: int = 0) -> dict:
 # ===================================================================
 # [Fix-A] 修复后的交互式句子 HTML 生成函数（接口不变，内部用 token.deps_info）
 # ===================================================================
+
 def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_position,
                                        sentence_id, core_lemmas, modifier_lemmas,
                                        book_name, display_sentence, simplify_mode=None):
+    """
+    【升级后的接口】不再生成 HTML 字符串，而是将数据加工为全新双向组件所需的 tokens 格式
+    """
 
+    # 1. 依然保留你原有的简化、过滤单词的逻辑
     def should_show_word(word_idx):
         if simplify_mode is None:
             return True
@@ -1025,172 +1030,55 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
             return not any(r in {'ccomp', 'xcomp', 'advcl'} for r in as_dep_rels)
         return True
 
-    html_parts     = []
-    word_data_json = []
+    structured_tokens = []
 
     for idx, word_data in enumerate(words):
-        word  = word_data['display']
+        word = word_data['display']
         lemma = word_data.get('lemma')
-        freq  = word_data.get('freq', 0)
+        freq = word_data.get('freq', 0)
 
+        # 如果被过滤掉了，就不展示
         if lemma and not should_show_word(idx):
             continue
 
+        # 初始化单字样式数据
+        token_item = {
+            "display": word,
+            "lemma": lemma or "",
+            "position": idx,
+            "color": "#888888",  # 标点符号默认灰度
+            "is_bold": False,
+            "is_italic": False,
+            "deps_info": []
+        }
+
         if lemma:
-            color    = get_color(freq)
-            size_str, font = get_font_style_by_frequency(freq)
-            size     = int(size_str.replace('px', ''))
-            styles   = [f"color:{color}", f"font-size:{size}px",
-                        f"font-family:{font}", "cursor:pointer"]
-            if lemma in core_lemmas:     styles.append("font-weight:bold")
-            if lemma in modifier_lemmas: styles.append("font-style:italic")
-            style_str = "; ".join(styles)
+            # 2. 完美继承你原有的频率颜色、粗体、斜体算法
+            color = get_color(freq)
+            token_item["color"] = color
 
-            # 用 token 里预存的 deps_info 构建 JS 数据（保持 iframe 高亮功能）
-            # dep_data = []
-            # if idx in dep_map_by_position:
-            #     for related_idx, deprel, related_lemma in dep_map_by_position[idx]:
-            #         dep_data.append({
-            #             'position': related_idx,
-            #             'lemma':    related_lemma,
-            #             'deprel':   deprel,
-            #         })
+            if lemma in core_lemmas:
+                token_item["is_bold"] = True
+            if lemma in modifier_lemmas:
+                token_item["is_italic"] = True
 
-            #  改为直接从 word_data 中读取预存的对齐数据：
-            dep_data = []
+            # 3. 完美转换依存关系数据，映射到新组件
             if 'deps_info' in word_data and word_data['deps_info']:
                 for dep_item in word_data['deps_info']:
-                    dep_data.append({
-                        'position': dep_item.get('position'),    # head 词的 0-based 位置
-                        'lemma':    dep_item.get('head_lemma'),  # head 词的 lemma
-                        'deprel':   dep_item.get('deprel'),
+                    # 这里把老数据里的 head 词位置对齐传给前端
+                    token_item["deps_info"].append({
+                        'head_position': dep_item.get('position'),  # 对应前端 data-position 匹配
+                        'deprel': dep_item.get('deprel'),
+                        'head_lemma': dep_item.get('head_lemma')
                     })
-            word_data_json.append({
-                'idx': idx, 'lemma': lemma, 'word': word, 'deps': dep_data
-            })
-            html_parts.append(
-                f'<span class="word" data-idx="{idx}" '
-                f'data-lemma="{html.escape(lemma)}" '
-                f'style="{style_str}">{html.escape(word)}</span> '
-            )
-        # else:
-        #     html_parts.append(
-        #         f'<span style="color:#555555; font-size:15px; '
-        #         f'font-family:Merriweather">{html.escape(word)}</span> '
-        #     )
         else:
-            # 将字号调整到 24px - 26px 左右，与主体视觉对齐
-            html_parts.append(
-                f'<span style="color:#555555; font-size:15px; '
-                f'font-family:Merriweather, serif">{html.escape(word)}</span> '
-            )
+            # 标点符号或无 lemma 词
+            token_item["color"] = "#555555"
 
-    sentence_html = ''.join(html_parts)
+        structured_tokens.append(token_item)
 
-    full_html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{
-            margin: 0; padding: 20px;
-            font-family: Arial, sans-serif; background: #F5E6C8;
-        }}
-        .sentence-container {{
-            font-size: 28px; line-height: 2.5; padding: 20px;
-            background: #F5E6C8; border-radius: 10px;
-            cursor: default; user-select: none;
-        }}
-        .word {{
-            transition: background-color 0.2s;
-            padding: 2px 4px; border-radius: 3px;
-        }}
-        .word:hover {{ background-color: #f0f0f0; }}
-        .dep-relation {{
-            margin-top: 15px; padding: 15px; background: #e3f2fd;
-            border-radius: 8px; font-size: 16px;
-            border-left: 4px solid #2196F3; animation: fadeIn 0.3s;
-        }}
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(-10px); }}
-            to   {{ opacity: 1; transform: translateY(0); }}
-        }}
-        .relation-title {{ font-weight: bold; margin-bottom: 8px; color: #1976D2; }}
-        .relation-item  {{ margin: 5px 0; padding: 5px; background: white; border-radius: 4px; }}
-    </style>
-</head>
-<body>
-    <div class="sentence-container" id="sentenceContainer">
-        {sentence_html}
-    </div>
-    <div id="depRelationContainer"></div>
-
-    <script>
-        const wordData     = {json.dumps(word_data_json)};
-        const deprelLabels = {json.dumps(DEPREL_LABELS)};
-
-        const idxToElement = new Map();
-        wordData.forEach(d => {{
-            const el = document.querySelector(`.word[data-idx="${{d.idx}}"]`);
-            if (el) idxToElement.set(d.idx, el);
-        }});
-
-        document.querySelectorAll('.word').forEach(el => {{
-            el.addEventListener('click', function(e) {{
-                e.stopPropagation();
-                handleClick(this);
-            }});
-        }});
-
-        function handleClick(element) {{
-            clearHighlights();
-            const idx  = parseInt(element.dataset.idx);
-            const data = wordData.find(d => d.idx === idx);
-            if (!data) return;
-
-            element.style.outline = '3px solid #39FF14';
-            data.deps.forEach(dep => {{
-                const relEl = idxToElement.get(dep.position);
-                if (relEl) relEl.style.outline = '3px solid #39FF14';
-            }});
-
-            if (data.deps.length > 0) showDependencies(data);
-        }}
-
-        function showDependencies(data) {{
-            const container = document.getElementById('depRelationContainer');
-            container.innerHTML = '';
-            const div = document.createElement('div');
-            div.className = 'dep-relation';
-            let h = '<div class="relation-title">Dependency relations:</div>';
-            data.deps.forEach(dep => {{
-                const note  = deprelLabels[dep.deprel] || dep.deprel;
-                const label = (note !== dep.deprel)
-                    ? note + ' (' + dep.deprel + ')' : dep.deprel;
-                h += `<div class="relation-item">
-                    <strong>${{data.word}}</strong>
-                    ──${{label}}──&gt;
-                    <strong>${{dep.lemma}}</strong>
-                    </div>`;
-            }});
-            div.innerHTML = h;
-            container.appendChild(div);
-        }}
-
-        function clearHighlights() {{
-            document.querySelectorAll('.word').forEach(w => w.style.outline = '');
-            document.getElementById('depRelationContainer').innerHTML = '';
-        }}
-
-        document.addEventListener('click', function(e) {{
-            if (!e.target.classList.contains('word')) clearHighlights();
-        }});
-    </script>
-</body>
-</html>"""
-    return full_html
-
-
+    # 4. 【核心改动】直接返回组件需要的 tokens 字典列表
+    return structured_tokens
 # ===================================================================
 # [改动4] Session 初始化 + 侧边栏
 # 认证：改用 auth.py 连接远程 FastAPI
@@ -1580,7 +1468,76 @@ with tab1:
             st.session_state.daily_plan["current_day_progress"] += 1
             save_progress()
             st.rerun()
+    # ============================================================
+    # 升级版：融合了 dwell_ms 计算与样式加工的新逻辑
+    # ============================================================
 
+    # 1. 先调用改造后的接口生成包含颜色、样式、简化模式过滤后的新 tokens 列表
+    processed_tokens = generate_interactive_sentence_html(
+        words=sentence_tokens,  # 传入你原始的单词列表
+        dep_map_by_position=dep_map_by_position,
+        dep_roles_by_position=dep_roles_by_position,
+        sentence_id=sentence_id,
+        core_lemmas=core_lemmas,
+        modifier_lemmas=modifier_lemmas,
+        book_name=book_name,
+        display_sentence=display_sentence,
+        simplify_mode=st.session_state.get('simplify_mode', None)  # 传入当前的简化模式
+    )
+
+    # 2. 将加工好的 processed_tokens 喂给双向交互组件
+    # 💡 注意：key 加上了 simplify_mode，用来在切换模式时强制刷新组件，隐藏被过滤的词
+    interaction_result = word_interaction_panel(
+        tokens=processed_tokens,  # 👈 升级：换成加工过样式和过滤后的数据
+        dep_map=dep_map_by_position,
+        sentence_id=sentence_id,
+        key=f"word_panel_{book_name}_{display_sentence}_{st.session_state.get('simplify_mode', 'full')}"
+    )
+
+    # 3. 处理组件返回的点击或右键菜单回调
+    if interaction_result:
+        word_data = interaction_result["word"]
+
+        if interaction_result["action"] == "click":
+            # 💡 升级：计算真实的两次点击时间差 dwell_ms，完美复原旧版功能
+            now = time.time()
+            last_key = f"_last_click_time_{book_name}_{sentence_id}"
+            last_click_time = st.session_state.get(last_key)
+            dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
+            st.session_state[last_key] = now
+
+            # 使用计算出的真实 dwell_ms 构建事件并写入缓存
+            ev = _build_click_event(word_data, dwell_ms=dwell_ms)
+            current_click_log.append(ev)
+            st.session_state[click_cache_key] = current_click_log
+
+            # 提取高亮的依存关系数量进行友好提示
+            dep_summary = (
+                f" → deps: {', '.join(d['deprel'] for d in ev['deps'])}"
+                if ev.get('deps') else " (no deps)"
+            )
+            st.toast(f"recorded: {word_data['display']}{dep_summary}")
+
+        elif interaction_result["action"] == "add_wordbook":
+            # 保持原右键“加入单词本”逻辑不变，做好空值兼容
+            entry = {
+                "word": word_data.get("lemma", word_data["display"]),
+                "display": word_data["display"],
+                "book": book_name,
+                "sentence_id": sentence_id,
+            }
+            if entry not in st.session_state.user_wordbook:
+                st.session_state.user_wordbook.append(entry)
+                st.toast(f"✅ added in the wordbook: {word_data['display']}")
+            else:
+                st.toast(f"'{word_data['display']}' is already in the wordbook")
+
+    # 4. 保持原有的下方日志状态提示，方便实时观察记录了多少个词
+    if current_click_log:
+        st.caption(
+            f"Recorded clicks for this sentence: {len(current_click_log)} | "
+            f"Words: {', '.join(dict.fromkeys(ev.get('word', '?') for ev in current_click_log))}"
+        )
     # # ── 渲染交互句子 ──
     # interactive_html = generate_interactive_sentence_html(
     #     sentence_tokens, dep_map_by_position, dep_roles_by_position,
@@ -1640,34 +1597,34 @@ with tab1:
     # 替代原 generate_interactive_sentence_html + 按钮网格的双重交互
     # 新逻辑：单一面板内左键高亮+记录，右键加单词本
     # ============================================================
-    interaction_result = word_interaction_panel(
-        tokens=sentence_tokens,
-        dep_map=dep_map_by_position,
-        sentence_id=sentence_id,
-        key=f"word_panel_{book_name}_{display_sentence}"
-    )
-
-    if interaction_result:
-        word_data = interaction_result["word"]
-
-        if interaction_result["action"] == "click":
-            # 替代原 _build_click_event + current_click_log.append(ev)
-            ev = _build_click_event(word_data, dwell_ms=0)
-            current_click_log.append(ev)
-            st.session_state[click_cache_key] = current_click_log
-            st.toast(f"recorded: {word_data['display']}")
-
-        elif interaction_result["action"] == "add_wordbook":
-            # 替代原单独的"💾 Add to wordbook"按钮逻辑（原第1688-1708行）
-            entry = {
-                "word": word_data["lemma"], "display": word_data["display"],
-                "book": book_name, "sentence_id": sentence_id,
-            }
-            if entry not in st.session_state.user_wordbook:
-                st.session_state.user_wordbook.append(entry)
-                st.toast(f"✅ added in the wordbook: {word_data['display']}")
-            else:
-                st.toast(f"'{word_data['display']}' is already in the wordbook")
+    # interaction_result = word_interaction_panel(
+    #     tokens=sentence_tokens,
+    #     dep_map=dep_map_by_position,
+    #     sentence_id=sentence_id,
+    #     key=f"word_panel_{book_name}_{display_sentence}"
+    # )
+    #
+    # if interaction_result:
+    #     word_data = interaction_result["word"]
+    #
+    #     if interaction_result["action"] == "click":
+    #         # 替代原 _build_click_event + current_click_log.append(ev)
+    #         ev = _build_click_event(word_data, dwell_ms=0)
+    #         current_click_log.append(ev)
+    #         st.session_state[click_cache_key] = current_click_log
+    #         st.toast(f"recorded: {word_data['display']}")
+    #
+    #     elif interaction_result["action"] == "add_wordbook":
+    #         # 替代原单独的"💾 Add to wordbook"按钮逻辑（原第1688-1708行）
+    #         entry = {
+    #             "word": word_data["lemma"], "display": word_data["display"],
+    #             "book": book_name, "sentence_id": sentence_id,
+    #         }
+    #         if entry not in st.session_state.user_wordbook:
+    #             st.session_state.user_wordbook.append(entry)
+    #             st.toast(f"✅ added in the wordbook: {word_data['display']}")
+    #         else:
+    #             st.toast(f"'{word_data['display']}' is already in the wordbook")
 
     # ── 句子统计面板 ──
     with st.expander("📐 Sentence complexity metrics", expanded=False):
