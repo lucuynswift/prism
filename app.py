@@ -1491,7 +1491,7 @@ with tab1:
         tokens=processed_tokens,  # 👈 升级：换成加工过样式和过滤后的数据
         dep_map=dep_map_by_position,
         sentence_id=sentence_id,
-        key=f"word_panel_{book_name}_{display_sentence}_{st.session_state.get('simplify_mode', 'full')}"
+        key = f"word_panel_{sentence_id}_{st.session_state.get('simplify_mode', 'full')}"
     )
 
     # 3. 处理组件返回的点击或右键菜单回调
