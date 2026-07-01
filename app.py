@@ -6,6 +6,12 @@
 #   [改动3] 用户系统替换为远程 FastAPI 认证（auth）
 #   [改动4] 侧边栏书籍选择改为从 book_registry 动态生成，支持免费/付费分层
 #   [改动5] 免费体验策略：注册后14天全功能免费，到期后每天3句
+
+# ============================================================
+# app.py 文件头部新增（约第1-30行import区域）
+# 引入新建的双向交互组件，替代原来分离的高亮HTML + 按钮网格
+# ============================================================
+from components.word_interaction import word_interaction_panel
 import os
 import streamlit as st
 import streamlit.components.v1 as components
@@ -1575,60 +1581,93 @@ with tab1:
             save_progress()
             st.rerun()
 
-    # ── 渲染交互句子 ──
-    interactive_html = generate_interactive_sentence_html(
-        sentence_tokens, dep_map_by_position, dep_roles_by_position,
-        sentence_id, core_lemmas, modifier_lemmas,
-        book_name, display_sentence, st.session_state.get('simplify_mode'))
-    components.html(interactive_html, height=400, scrolling=True)
+    # # ── 渲染交互句子 ──
+    # interactive_html = generate_interactive_sentence_html(
+    #     sentence_tokens, dep_map_by_position, dep_roles_by_position,
+    #     sentence_id, core_lemmas, modifier_lemmas,
+    #     book_name, display_sentence, st.session_state.get('simplify_mode'))
+    # components.html(interactive_html, height=400, scrolling=True)
+    #
+    # # ── Word click tracker ──
+    # st.markdown("**🖱 Click words below to record the log:**")
+    # valid_tokens = [(idx, t) for idx, t in enumerate(sentence_tokens) if t.get("lemma")]
+    #
+    # # [诊断] 显示当前句有多少个 token 有 deps_info
+    # tokens_with_deps = [(idx, t) for idx, t in valid_tokens if t.get("deps_info")]
+    # if tokens_with_deps:
+    #     st.caption(
+    #         f"ℹ️ {len(tokens_with_deps)} words have dependency info embedded: "
+    #         + ", ".join(f"{t['display']}({len(t['deps_info'])})" for _, t in tokens_with_deps[:8])
+    #     )
+    # else:
+    #     st.caption("⚠️ No dependency info found for any token in this sentence. "
+    #                "Check that dep_map_by_position keys match split() positions.")
+    #
+    # if valid_tokens:
+    #     cols_per_row = 6
+    #     for i in range(0, len(valid_tokens), cols_per_row):
+    #         cols = st.columns(cols_per_row)
+    #         for j, (idx, token) in enumerate(valid_tokens[i:i + cols_per_row]):
+    #             with cols[j]:
+    #                 btn_key = f"click_{book_name}_{display_sentence}_{idx}_{token['lemma']}"
+    #                 if st.button(token["display"], key=btn_key, use_container_width=True):
+    #                     now = time.time()
+    #                     last_key = f"_last_click_time_{book_name}_{sentence_id}"
+    #                     last_click_time = st.session_state.get(last_key)
+    #                     dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
+    #                     st.session_state[last_key] = now
+    #
+    #                     # [Fix-B] 直接从 token 的 deps_info 读取
+    #                     ev = _build_click_event(token, dwell_ms=dwell_ms)
+    #                     current_click_log.append(ev)
+    #                     st.session_state[click_cache_key] = current_click_log
+    #
+    #                     dep_summary = (
+    #                         f" → deps: {', '.join(d['deprel'] for d in ev['deps'])}"
+    #                         if ev['deps'] else " (no deps)"
+    #                     )
+    #                     st.success(f"Recorded: {token['display']}{dep_summary}")
+    #
+    # if current_click_log:
+    #     st.caption(
+    #         f"Recorded clicks for this sentence: {len(current_click_log)} | "
+    #         f"Words: {', '.join(dict.fromkeys(ev.get('word','?') for ev in current_click_log))}"
+    #     )
+    # else:
+    #     st.info("No word clicks recorded yet. Click the words above to create a log entry.")
+    # ============================================================
+    # 改动位置：app.py 第1525行附近
+    # 替代原 generate_interactive_sentence_html + 按钮网格的双重交互
+    # 新逻辑：单一面板内左键高亮+记录，右键加单词本
+    # ============================================================
+    interaction_result = word_interaction_panel(
+        tokens=sentence_tokens,
+        dep_map=dep_map_by_position,
+        sentence_id=sentence_id,
+        key=f"word_panel_{book_name}_{display_sentence}"
+    )
 
-    # ── Word click tracker ──
-    st.markdown("**🖱 Click words below to record the log:**")
-    valid_tokens = [(idx, t) for idx, t in enumerate(sentence_tokens) if t.get("lemma")]
+    if interaction_result:
+        word_data = interaction_result["word"]
 
-    # [诊断] 显示当前句有多少个 token 有 deps_info
-    tokens_with_deps = [(idx, t) for idx, t in valid_tokens if t.get("deps_info")]
-    if tokens_with_deps:
-        st.caption(
-            f"ℹ️ {len(tokens_with_deps)} words have dependency info embedded: "
-            + ", ".join(f"{t['display']}({len(t['deps_info'])})" for _, t in tokens_with_deps[:8])
-        )
-    else:
-        st.caption("⚠️ No dependency info found for any token in this sentence. "
-                   "Check that dep_map_by_position keys match split() positions.")
+        if interaction_result["action"] == "click":
+            # 替代原 _build_click_event + current_click_log.append(ev)
+            ev = _build_click_event(word_data, dwell_ms=0)
+            current_click_log.append(ev)
+            st.session_state[click_cache_key] = current_click_log
+            st.toast(f"recorded: {word_data['display']}")
 
-    if valid_tokens:
-        cols_per_row = 6
-        for i in range(0, len(valid_tokens), cols_per_row):
-            cols = st.columns(cols_per_row)
-            for j, (idx, token) in enumerate(valid_tokens[i:i + cols_per_row]):
-                with cols[j]:
-                    btn_key = f"click_{book_name}_{display_sentence}_{idx}_{token['lemma']}"
-                    if st.button(token["display"], key=btn_key, use_container_width=True):
-                        now = time.time()
-                        last_key = f"_last_click_time_{book_name}_{sentence_id}"
-                        last_click_time = st.session_state.get(last_key)
-                        dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
-                        st.session_state[last_key] = now
-
-                        # [Fix-B] 直接从 token 的 deps_info 读取
-                        ev = _build_click_event(token, dwell_ms=dwell_ms)
-                        current_click_log.append(ev)
-                        st.session_state[click_cache_key] = current_click_log
-
-                        dep_summary = (
-                            f" → deps: {', '.join(d['deprel'] for d in ev['deps'])}"
-                            if ev['deps'] else " (no deps)"
-                        )
-                        st.success(f"Recorded: {token['display']}{dep_summary}")
-
-    if current_click_log:
-        st.caption(
-            f"Recorded clicks for this sentence: {len(current_click_log)} | "
-            f"Words: {', '.join(dict.fromkeys(ev.get('word','?') for ev in current_click_log))}"
-        )
-    else:
-        st.info("No word clicks recorded yet. Click the words above to create a log entry.")
+        elif interaction_result["action"] == "add_wordbook":
+            # 替代原单独的"💾 Add to wordbook"按钮逻辑（原第1688-1708行）
+            entry = {
+                "word": word_data["lemma"], "display": word_data["display"],
+                "book": book_name, "sentence_id": sentence_id,
+            }
+            if entry not in st.session_state.user_wordbook:
+                st.session_state.user_wordbook.append(entry)
+                st.toast(f"✅ added in the wordbook: {word_data['display']}")
+            else:
+                st.toast(f"'{word_data['display']}' is already in the wordbook")
 
     # ── 句子统计面板 ──
     with st.expander("📐 Sentence complexity metrics", expanded=False):
@@ -1735,30 +1774,30 @@ with tab1:
     # if tts_audio_key in st.session_state:
     #     st.audio(st.session_state[tts_audio_key], format="audio/mp3")
 
-    # ── 加词到词汇本 ──
-    if sentence_tokens:
-        st.markdown("---")
-        st.markdown("**💾 Add to wordbook (click words):**")
-        valid_tokens_wb = [t for t in sentence_tokens if t.get('lemma')]
-        if valid_tokens_wb:
-            cols_per_row = 6
-            for i in range(0, len(valid_tokens_wb), cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j, token in enumerate(valid_tokens_wb[i:i + cols_per_row]):
-                    with cols[j]:
-                        btn_key = f"add_{book_name}_{display_sentence}_{token['lemma']}_{i+j}"
-                        if st.button(token['display'], key=btn_key,
-                                     use_container_width=True,
-                                     help=f"Click to add '{token['display']}' to the wordbook"):
-                            entry = {"book": book_name,
-                                     "lemma": token['lemma'],
-                                     "word":  token['display']}
-                            if entry not in st.session_state.user_wordbook:
-                                st.session_state.user_wordbook.append(entry)
-                                st.success(f"✅ Added '{token['display']}' to the wordbook.")
-                                save_progress()
-                            else:
-                                st.info(f"'{token['display']}' is already in the wordbook.")
+    # # ── 加词到词汇本 ──
+    # if sentence_tokens:
+    #     st.markdown("---")
+    #     st.markdown("**💾 Add to wordbook (click words):**")
+    #     valid_tokens_wb = [t for t in sentence_tokens if t.get('lemma')]
+    #     if valid_tokens_wb:
+    #         cols_per_row = 6
+    #         for i in range(0, len(valid_tokens_wb), cols_per_row):
+    #             cols = st.columns(cols_per_row)
+    #             for j, token in enumerate(valid_tokens_wb[i:i + cols_per_row]):
+    #                 with cols[j]:
+    #                     btn_key = f"add_{book_name}_{display_sentence}_{token['lemma']}_{i+j}"
+    #                     if st.button(token['display'], key=btn_key,
+    #                                  use_container_width=True,
+    #                                  help=f"Click to add '{token['display']}' to the wordbook"):
+    #                         entry = {"book": book_name,
+    #                                  "lemma": token['lemma'],
+    #                                  "word":  token['display']}
+    #                         if entry not in st.session_state.user_wordbook:
+    #                             st.session_state.user_wordbook.append(entry)
+    #                             st.success(f"✅ Added '{token['display']}' to the wordbook.")
+    #                             save_progress()
+    #                         else:
+    #                             st.info(f"'{token['display']}' is already in the wordbook.")
 
     st.caption(
         f"Viewing sentence {display_sentence + 1} / {total_sentences} "
