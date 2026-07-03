@@ -187,7 +187,15 @@ try:
     GRAPHVIZ_AVAILABLE = True
 except ImportError:
     GRAPHVIZ_AVAILABLE = False
+def clean_word(word):
+    # 逻辑：先转小写，去除非字母数字和连字符，再去掉首尾多余符号
+    cleaned = re.sub(r"[^\w''\-]", "", word.lower())
+    cleaned = cleaned.strip("''-")
+    return cleaned
 
+def get_lemma_for_lookup(cleaned_word):
+    # 逻辑：去除用于匹配字典的特殊符号
+    return re.sub(r"[''`\-]", "", cleaned_word)
 #nltk.download('wordnet', quiet=True)
 #nltk.download('omw-1.4', quiet=True)
 #lemmatizer = WordNetLemmatizer()
@@ -928,22 +936,36 @@ def build_sentence_tokens(sentence_text: str,
     tokens = []
 
     for split_idx, word in enumerate(sentence_text.split()):
-        cleaned = re.sub(r"[^\w''\-]", "", word.lower())
-        cleaned = cleaned.strip("''-")
-        is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
-
+        cleaned = clean_word(word)  # 使用统一清洗
+        is_word = bool(re.search(r'[a-zA-Z]', cleaned))
+        # is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
         lemma = None
-        # 【核心修改点】改为直接查询预加载的全局词频
-        # 如果是标点符号，freq 保持为 0
         freq = 0
         deps_info = []
 
         if is_word:
-            for_lemma = re.sub(r"[''`\-]", "", cleaned)
+            for_lemma = get_lemma_for_lookup(cleaned)  # 使用统一提取
             if for_lemma:
                 lemma = cached_lemmatize(for_lemma)
-                # 直接使用全局词频，去掉 running_counter[lemma] += 1
-                freq = global_freq_dict.get(lemma.lower(), 1)
+                # 【关键】确保这里的 key 处理与 data_loader 中存储时一致
+                lookup_key = lemma.lower().strip()
+                freq = global_freq_dict.get(lookup_key, 1)
+        # cleaned = re.sub(r"[^\w''\-]", "", word.lower())
+        # cleaned = cleaned.strip("''-")
+        # is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
+        #
+        # lemma = None
+        # # 【核心修改点】改为直接查询预加载的全局词频
+        # # 如果是标点符号，freq 保持为 0
+        # freq = 0
+        # deps_info = []
+        #
+        # if is_word:
+        #     for_lemma = re.sub(r"[''`\-]", "", cleaned)
+        #     if for_lemma:
+        #         lemma = cached_lemmatize(for_lemma)
+        #         # 直接使用全局词频，去掉 running_counter[lemma] += 1
+        #         freq = global_freq_dict.get(lemma.lower(), 1)
 
             if dep_map_by_position is not None:
                 for related_idx, deprel, related_lemma in dep_map_by_position.get(split_idx, []):
