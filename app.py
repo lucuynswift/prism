@@ -918,78 +918,120 @@ def append_behavior_record(username: str, record: dict):
 #                            sentence_deltas: list,
 #                            display_sentence: int,
 #                            dep_map_by_position: dict | None = None) -> list:
-
 def build_sentence_tokens(sentence_text: str,
-                          sentence_deltas: list,
-                          display_sentence: int,
                           dep_map_by_position: dict | None = None,
-                          prefix_counters: list | None = None) -> list:  # 👈 1. 参入传入前缀和
-
-    """
-    返回 token 列表，每个 token 包含：
-      display   : 原始词（含标点）
-      lemma     : 词元（None 表示标点/非字母词）
-      freq      : 历史出现频次
-      deps_info : list[dict]，每条包含 head_lemma / deprel / pair 三个字段
-                  （仅当 dep_map_by_position 不为 None 且该 token 有依存时非空）
-    """
+                          # 注意：如果你不再需要根据进度累加，可以将这些参数设为可选或忽略
+                          **kwargs) -> list:
     if not sentence_text:
         return []
-    # freq_before = sum(sentence_deltas[:display_sentence], Counter())
-    # running_counter = Counter(freq_before)
-    # tokens = []
 
-    # 👈 2. 彻底抛弃旧的 sum 累加，改为 O(1) 查表。若无前缀和（兼容老架构）则兜底
-    # if prefix_counters is not None and display_sentence < len(prefix_counters):
-    #     freq_before = prefix_counters[display_sentence]
-    # else:
-    #     freq_before = sum(sentence_deltas[:display_sentence], Counter())
-    if prefix_counters is not None and isinstance(prefix_counters, dict):
-        step = 50  # 与 data_loader.py 里 STEP=50 保持一致
-        checkpoint_idx = (display_sentence // step) * step
-        base = prefix_counters.get(checkpoint_idx, Counter()).copy()
-        for i in range(checkpoint_idx, display_sentence):
-            if i < len(sentence_deltas):
-                base.update(sentence_deltas[i])
-        freq_before = base
-    else:
-        freq_before = sum(sentence_deltas[:display_sentence], Counter())
-#==========================================================================================================
-    running_counter = Counter(freq_before)
     tokens = []
+
     for split_idx, word in enumerate(sentence_text.split()):
         cleaned = re.sub(r"[^\w''\-]", "", word.lower())
         cleaned = cleaned.strip("''-")
         is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
+
         lemma = None
-        freq  = 0
+        # 【核心修改点】改为直接查询预加载的全局词频
+        # 如果是标点符号，freq 保持为 0
+        freq = 0
         deps_info = []
 
         if is_word:
             for_lemma = re.sub(r"[''`\-]", "", cleaned)
             if for_lemma:
                 lemma = cached_lemmatize(for_lemma)
-                running_counter[lemma] += 1
-                freq = running_counter[lemma]
+                # 直接使用全局词频，去掉 running_counter[lemma] += 1
+                freq = global_freq_dict.get(lemma.lower(), 1)
 
-            # [Fix-A] embed dep 信息：dep_map_by_position 的 key = dependent_id - 1
-            # 这里用 split_idx（0-based 词序）作为 key，与 dependent_id-1 对应
             if dep_map_by_position is not None:
                 for related_idx, deprel, related_lemma in dep_map_by_position.get(split_idx, []):
                     deps_info.append({
                         "head_lemma": str(related_lemma),
-                        "deprel":     str(deprel),
-                        "position":   related_idx,          # ← head 词在句中的 0-based 位置，JS 高亮需要
-                        "pair":       f"{word} → {related_lemma} ({deprel})",
+                        "deprel": str(deprel),
+                        "position": related_idx,
+                        "pair": f"{word} → {related_lemma} ({deprel})",
                     })
 
         tokens.append({
-            "display":   word,
-            "lemma":     lemma,
-            "freq":      freq,
-            "deps_info": deps_info,   # 新增字段
+            "display": word,
+            "lemma": lemma,
+            "freq": freq,  # 这个 freq 现在是严格的静态全局频率
+            "deps_info": deps_info,
         })
     return tokens
+# def build_sentence_tokens(sentence_text: str,
+#                           sentence_deltas: list,
+#                           display_sentence: int,
+#                           dep_map_by_position: dict | None = None,
+#                           prefix_counters: list | None = None) -> list:  # 👈 1. 参入传入前缀和
+#
+#     """
+#     返回 token 列表，每个 token 包含：
+#       display   : 原始词（含标点）
+#       lemma     : 词元（None 表示标点/非字母词）
+#       freq      : 历史出现频次
+#       deps_info : list[dict]，每条包含 head_lemma / deprel / pair 三个字段
+#                   （仅当 dep_map_by_position 不为 None 且该 token 有依存时非空）
+#     """
+#     if not sentence_text:
+#         return []
+#     # freq_before = sum(sentence_deltas[:display_sentence], Counter())
+#     # running_counter = Counter(freq_before)
+#     # tokens = []
+#
+#     # 👈 2. 彻底抛弃旧的 sum 累加，改为 O(1) 查表。若无前缀和（兼容老架构）则兜底
+#     # if prefix_counters is not None and display_sentence < len(prefix_counters):
+#     #     freq_before = prefix_counters[display_sentence]
+#     # else:
+#     #     freq_before = sum(sentence_deltas[:display_sentence], Counter())
+#     if prefix_counters is not None and isinstance(prefix_counters, dict):
+#         step = 50  # 与 data_loader.py 里 STEP=50 保持一致
+#         checkpoint_idx = (display_sentence // step) * step
+#         base = prefix_counters.get(checkpoint_idx, Counter()).copy()
+#         for i in range(checkpoint_idx, display_sentence):
+#             if i < len(sentence_deltas):
+#                 base.update(sentence_deltas[i])
+#         freq_before = base
+#     else:
+#         freq_before = sum(sentence_deltas[:display_sentence], Counter())
+# #==========================================================================================================
+#     running_counter = Counter(freq_before)
+#     tokens = []
+#     for split_idx, word in enumerate(sentence_text.split()):
+#         cleaned = re.sub(r"[^\w''\-]", "", word.lower())
+#         cleaned = cleaned.strip("''-")
+#         is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
+#         lemma = None
+#         freq  = 0
+#         deps_info = []
+#
+#         if is_word:
+#             for_lemma = re.sub(r"[''`\-]", "", cleaned)
+#             if for_lemma:
+#                 lemma = cached_lemmatize(for_lemma)
+#                 running_counter[lemma] += 1
+#                 freq = running_counter[lemma]
+#
+#             # [Fix-A] embed dep 信息：dep_map_by_position 的 key = dependent_id - 1
+#             # 这里用 split_idx（0-based 词序）作为 key，与 dependent_id-1 对应
+#             if dep_map_by_position is not None:
+#                 for related_idx, deprel, related_lemma in dep_map_by_position.get(split_idx, []):
+#                     deps_info.append({
+#                         "head_lemma": str(related_lemma),
+#                         "deprel":     str(deprel),
+#                         "position":   related_idx,          # ← head 词在句中的 0-based 位置，JS 高亮需要
+#                         "pair":       f"{word} → {related_lemma} ({deprel})",
+#                     })
+#
+#         tokens.append({
+#             "display":   word,
+#             "lemma":     lemma,
+#             "freq":      freq,
+#             "deps_info": deps_info,   # 新增字段
+#         })
+#     return tokens
 
 
 # ===================================================================
@@ -1426,11 +1468,11 @@ with tab1:
     # ── [Fix-A] 构建 sentence_tokens，同时传入 dep_map_by_position ──
     sentence_tokens     = build_sentence_tokens(
         sentence_text,
-        data["sentence_deltas"],
-        display_sentence,
+        #data["sentence_deltas"],
+        #display_sentence,
         dep_map_by_position,
        # data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
-        data.get("sparse_prefix_counters")
+       #data.get("sparse_prefix_counters")
     )
     sentence_word_count = len(sentence_text.split()) if sentence_text else 0
 

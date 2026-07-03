@@ -88,11 +88,11 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
         # 🌟 核心优化 1：直接获取第二列预计算好的全局词频，避免后续重复用 Counter 现场去数
         if lemma:
             lemma_lower = lemma.lower().strip()
-            if lemma_lower and lemma_lower not in global_freq_dict:
-                try:
-                    global_freq_dict[lemma_lower] = int(r.get('global_frequency', 1))
-                except (ValueError, TypeError):
-                    global_freq_dict[lemma_lower] = 1
+            #if lemma_lower and lemma_lower not in global_freq_dict:
+            try:
+                global_freq_dict[lemma_lower] = int(r.get('global_frequency', 1))
+            except (ValueError, TypeError):
+                global_freq_dict[lemma_lower] = 1
 
     for sid, pairs in lemma_by_sid.items():
         idx = sid - min_sid
