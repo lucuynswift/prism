@@ -18,8 +18,8 @@ import streamlit.components.v1 as components
 # pandas 已完全移除，改用原生 Python + SQLite
 from collections import Counter
 import plotly.express as px
-import plotly.graph_objects as go
 import re
+import plotly.graph_objects as go
 import time
 import datetime
 import json
@@ -940,11 +940,21 @@ def build_sentence_tokens(sentence_text: str,
     # tokens = []
 
     # 👈 2. 彻底抛弃旧的 sum 累加，改为 O(1) 查表。若无前缀和（兼容老架构）则兜底
-    if prefix_counters is not None and display_sentence < len(prefix_counters):
-        freq_before = prefix_counters[display_sentence]
+    # if prefix_counters is not None and display_sentence < len(prefix_counters):
+    #     freq_before = prefix_counters[display_sentence]
+    # else:
+    #     freq_before = sum(sentence_deltas[:display_sentence], Counter())
+    if prefix_counters is not None and isinstance(prefix_counters, dict):
+        step = 50  # 与 data_loader.py 里 STEP=50 保持一致
+        checkpoint_idx = (display_sentence // step) * step
+        base = prefix_counters.get(checkpoint_idx, Counter()).copy()
+        for i in range(checkpoint_idx, display_sentence):
+            if i < len(sentence_deltas):
+                base.update(sentence_deltas[i])
+        freq_before = base
     else:
         freq_before = sum(sentence_deltas[:display_sentence], Counter())
-
+#==========================================================================================================
     running_counter = Counter(freq_before)
     tokens = []
     for split_idx, word in enumerate(sentence_text.split()):
@@ -1419,7 +1429,8 @@ with tab1:
         data["sentence_deltas"],
         display_sentence,
         dep_map_by_position,
-        data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
+       # data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
+        data.get("sparse_prefix_counters")
     )
     sentence_word_count = len(sentence_text.split()) if sentence_text else 0
 
