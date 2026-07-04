@@ -34,12 +34,6 @@ from pathlib import Path
 import io
 import csv
 
-build_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "build")
-
-print(f"DEBUG: 正在寻找组件入口: {build_path}")
-print(f"DEBUG: 该目录下是否存在 index.html: {os.path.exists(os.path.join(build_path, 'index.html'))}")
-
-word_interaction_panel = components.declare_component("word_interaction_panel", path=build_path)
 # 🔍 补上这行：定义服务器上存放词汇表（COCA等）的绝对路径
 #WORDLISTS_DIR = Path("/opt/prism/app/wordlists")
 # ==================== 路径配置块 ====================
