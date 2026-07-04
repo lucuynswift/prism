@@ -1,3 +1,5 @@
+console.log("组件 JS 已成功执行！");
+console.log("组件已加载，开始执行渲染逻辑...");
 import { Streamlit } from "streamlit-component-lib"
 
 function onRender(event) {
