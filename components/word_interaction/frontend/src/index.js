@@ -1,63 +1,66 @@
-// ============================================================
-// 新文件：components/word_interaction/frontend/src/index.js
-// 左键：高亮依存 + 通知 Python 记录点击
-// 右键：弹出菜单，仅"加入单词本"一项
-// ============================================================
-import { Streamlit, RenderData } from "streamlit-component-lib"
+import { Streamlit } from "streamlit-component-lib"
 
 function onRender(event) {
-  const data = event.detail;
-  const { tokens, dep_map, sentence_id } = data.args;
-
+  const { tokens, sentence_id } = event.detail.args;
   const container = document.getElementById("root");
-  container.innerHTML = tokens.map(t =>
-    `<span class="word-token" data-position="${t.position}"
-           data-info='${JSON.stringify(t)}'>${t.display}</span>`
+  const depContainer = document.getElementById("depRelationContainer");
+
+  container.innerHTML = tokens.map(t => 
+    `<span class="word" data-idx="${t.position}" style="color:${t.color}; font-weight:${t.is_bold?'bold':'normal'}; font-style:${t.is_italic?'italic':'normal'};">
+       ${t.display}
+     </span>`
   ).join(" ");
 
-  container.querySelectorAll(".word-token").forEach(span => {
-    const wordData = JSON.parse(span.dataset.info);
+  container.querySelectorAll('.word').forEach(el => {
+    // 左键点击：显示依存关系
+    el.addEventListener('click', function() {
+      const idx = parseInt(this.dataset.idx);
+      const data = tokens.find(t => t.position === idx);
+      if (!data) return;
 
-    // 左键：高亮 + 上报点击
-    span.addEventListener("click", () => {
-      clearHighlights(container);
-      const deps = wordData.deps_info || [];
-      deps.forEach(d => {
-        const gov = container.querySelector(`[data-position="${d.head_position}"]`);
-        if (gov) gov.classList.add("dep-governor");
+      clearHighlights();
+      this.style.outline = '3px solid #39FF14';
+      data.deps_info.forEach(dep => {
+        const target = container.querySelector(`[data-idx="${dep.head_position}"]`);
+        if (target) target.style.outline = '3px solid #39FF14';
       });
-      Streamlit.setComponentValue({ action: "click", word: wordData, sentence_id });
+
+      if (data.deps_info.length > 0) {
+        depContainer.innerHTML = `
+          <div class="dep-relation">
+            <div class="relation-title">Dependency relations:</div>
+            ${data.deps_info.map(dep => `
+              <div class="relation-item">
+                <strong>${data.display}</strong> ──${dep.deprel}──> <strong>${dep.head_lemma}</strong>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+      Streamlit.setComponentValue({ action: "click", word: data, sentence_id });
     });
 
-    // 右键：仅弹出"加入单词本"
-    span.addEventListener("contextmenu", (e) => {
+    // 右键点击：加入单词本 (新增逻辑)
+    el.addEventListener('contextmenu', function(e) {
       e.preventDefault();
-      showMenu(e.pageX, e.pageY, wordData, sentence_id);
+      const idx = parseInt(this.dataset.idx);
+      const data = tokens.find(t => t.position === idx);
+      if (!data) return;
+      
+      // 直接触发加入单词本，无需额外确认
+      Streamlit.setComponentValue({ action: "add_wordbook", word: data, sentence_id: sentence_id });
+      
+      // 给用户一个简单的视觉反馈
+      const originalColor = this.style.color;
+      this.style.color = "red";
+      setTimeout(() => this.style.color = originalColor, 500);
     });
   });
-
-  Streamlit.setFrameHeight(400);
 }
 
-function clearHighlights(container) {
-  container.querySelectorAll(".dep-governor")
-    .forEach(el => el.classList.remove("dep-governor"));
-}
-
-function showMenu(x, y, wordData, sentenceId) {
-  document.querySelectorAll(".ctx-menu").forEach(el => el.remove());
-  const menu = document.createElement("div");
-  menu.className = "ctx-menu";
-  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:white;
-    border:1px solid #ddd;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.15);
-    z-index:1000;padding:6px 12px;cursor:pointer;font-size:14px;`;
-  menu.innerText = `+ 加入单词本 "${wordData.display}"`;
-  menu.onclick = () => {
-    Streamlit.setComponentValue({ action: "add_wordbook", word: wordData, sentence_id: sentenceId });
-    menu.remove();
-  };
-  document.body.appendChild(menu);
-  document.addEventListener("click", () => menu.remove(), { once: true });
+function clearHighlights() {
+  document.querySelectorAll('.word').forEach(w => w.style.outline = '');
+  document.getElementById('depRelationContainer').innerHTML = '';
 }
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
