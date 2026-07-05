@@ -1563,13 +1563,18 @@ with tab1:
 
     # 2. 将加工好的 processed_tokens 喂给双向交互组件
     # 💡 注意：key 加上了 simplify_mode，用来在切换模式时强制刷新组件，隐藏被过滤的词
+    # interaction_result = word_interaction_panel(
+    #     tokens=processed_tokens,  # 👈 升级：换成加工过样式和过滤后的数据
+    #     dep_map=dep_map_by_position,
+    #     sentence_id=sentence_id,
+    #     key = f"word_panel_{sentence_id}_{st.session_state.get('simplify_mode', 'full')}"
+    #)
     interaction_result = word_interaction_panel(
-        tokens=processed_tokens,  # 👈 升级：换成加工过样式和过滤后的数据
-        dep_map=dep_map_by_position,
-        sentence_id=sentence_id,
-        key = f"word_panel_{sentence_id}_{st.session_state.get('simplify_mode', 'full')}"
+        tokens=tokens_list,  # 🌟 传入加工好的单词样式数组
+        dep_map=dep_map_by_position,  # 🌟 核心：必须传入这个依存关系字典，前端 index.js 才能拿到数据！
+        sentence_id=sentence_id,  # 🌟 传入当前的句子 ID
+        key=f"word_panel_{sentence_id}"  # 🌟 核心修复：key 必须保持简短且唯一，用 sentence_id 就足够了，千万不要加 display_sentence
     )
-
     # 3. 处理组件返回的点击或右键菜单回调
     if interaction_result:
         word_data = interaction_result["word"]

@@ -7,7 +7,8 @@ function onRender(event) {
   var args = event.detail.args || {};
   var tokens = args.tokens || [];
   var sentence_id = args.sentence_id || null;
-
+  // 【关键修复 1】：必须把 dep_map 提取出来，否则点击时找不到数据！
+  var dep_map = args.dep_map || {};
   var container = document.getElementById("root");
   var depContainer = document.getElementById("depRelationContainer");
 
@@ -73,9 +74,10 @@ function onRender(event) {
             + '</div>';
         }
       }
-
+      // 【关键修复 3】：渲染完依存关系后，必须立刻更新高度！
+      updateHeight();
       Streamlit.setComponentValue({ action: "click", word: wordData, sentence_id: sentence_id });
-      updateHeight(container, depContainer);
+//      updateHeight(container, depContainer);
     });
 
     // 右键：加入单词本 + 视觉反馈
@@ -93,7 +95,8 @@ function onRender(event) {
     });
   });
 
-  updateHeight(container, depContainer);
+//  updateHeight(container, depContainer);
+  updateHeight();
 }
 
 function clearHighlights() {
@@ -104,12 +107,41 @@ function clearHighlights() {
   if (dep) dep.innerHTML = '';
 }
 
-function updateHeight(container, depContainer) {
+//function updateHeight(container, depContainer) {
+//  setTimeout(function() {
+//    var total = (container ? container.scrollHeight : 0)
+//              + (depContainer ? depContainer.scrollHeight : 0)
+//              + 50;
+//    Streamlit.setFrameHeight(Math.max(total, 130));
+//  }, 50);
+//}
+//function updateHeight() {
+//  // 【关键修复 2】：延迟 10 毫秒计算，确保 DOM 已经把依存关系渲染完毕
+//  setTimeout(function() {
+//    // 强制获取整个 body 的真实滚动高度
+//    var bodyHeight = document.body.scrollHeight;
+//    // 通知 Streamlit 调整 iframe 高度
+//    Streamlit.setFrameHeight(bodyHeight);
+//  }, 10);
+//}
+
+function updateHeight() {
+  // setTimeout 保留：这是对的，因为需要等待 DOM (依存关系文本) 渲染到页面上之后再测算高度
   setTimeout(function() {
-    var total = (container ? container.scrollHeight : 0)
-              + (depContainer ? depContainer.scrollHeight : 0)
-              + 50;
-    Streamlit.setFrameHeight(Math.max(total, 130));
+
+    // 1. 获取整个页面的真实内容高度 (包含了所有的 margin, padding 和子元素)
+    // 兼容性写法，确保能拿到准确的最大高度
+    var body = document.body;
+    var html = document.documentElement;
+    var realHeight = Math.max(
+      body.scrollHeight, body.offsetHeight,
+      html.clientHeight, html.scrollHeight, html.offsetHeight
+    );
+
+    // 2. 通知 Streamlit 更新 iframe 视窗高度
+    // 可以适当加 10~20px 的安全边距(buffer)，防止极个别浏览器底部出现滚动条
+    Streamlit.setFrameHeight(realHeight + 20);
+
   }, 50);
 }
 
