@@ -1570,7 +1570,7 @@ with tab1:
     #     key = f"word_panel_{sentence_id}_{st.session_state.get('simplify_mode', 'full')}"
     #)
     interaction_result = word_interaction_panel(
-        tokens=tokens_list,  # 🌟 传入加工好的单词样式数组
+        tokens=processed_tokens,  # 🌟 传入加工好的单词样式数组
         dep_map=dep_map_by_position,  # 🌟 核心：必须传入这个依存关系字典，前端 index.js 才能拿到数据！
         sentence_id=sentence_id,  # 🌟 传入当前的句子 ID
         key=f"word_panel_{sentence_id}"  # 🌟 核心修复：key 必须保持简短且唯一，用 sentence_id 就足够了，千万不要加 display_sentence
