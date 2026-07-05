@@ -1,20 +1,15 @@
 import streamlit.components.v1 as components
 import os
 
-_RELEASE = True
+# 修复：直接用绝对路径，避免 os.path.join(__file__) 二次拼接导致路径不存在
+absolute_build_path = "/opt/prism/app/components/word_interaction/frontend/build"
 
-# 路径统一：建议直接用 os.path.join 拼出来的路径，不要硬编码绝对路径
-base_path = os.path.dirname(os.path.abspath(__file__))
-absolute_build_path = os.path.join(base_path, "frontend", "build")
-
-# 🌟 建议：名称保持原样，不要随便加 _v10，这是组件的唯一标识
 _component_func = components.declare_component(
-    "word_interaction",  # 保持原名称，避免注册冲突
+    "word_interaction",
     path=absolute_build_path
 )
 
 def word_interaction_panel(tokens, dep_map, sentence_id, key=None):
-    # 此处传递参数，确保 tokens 和 dep_map 的结构与前端 JS 预期的 JSON 结构完全匹配
     return _component_func(
         tokens=tokens,
         dep_map=dep_map,
@@ -22,6 +17,7 @@ def word_interaction_panel(tokens, dep_map, sentence_id, key=None):
         key=key,
         default=None
     )
+
 
 # import streamlit.components.v1 as components
 # import os
