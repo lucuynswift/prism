@@ -1665,50 +1665,6 @@ with tab1:
 
 
 
-    # [诊断] 显示当前句有多少个 token 有 deps_info
-    tokens_with_deps = [(idx, t) for idx, t in valid_tokens if t.get("deps_info")]
-    if tokens_with_deps:
-        st.caption(
-            f"ℹ️ {len(tokens_with_deps)} words have dependency info embedded: "
-            + ", ".join(f"{t['display']}({len(t['deps_info'])})" for _, t in tokens_with_deps[:8])
-        )
-    else:
-        st.caption("⚠️ No dependency info found for any token in this sentence. "
-                   "Check that dep_map_by_position keys match split() positions.")
-
-    if valid_tokens:
-        cols_per_row = 6
-        for i in range(0, len(valid_tokens), cols_per_row):
-            cols = st.columns(cols_per_row)
-            for j, (idx, token) in enumerate(valid_tokens[i:i + cols_per_row]):
-                with cols[j]:
-                    btn_key = f"click_{book_name}_{display_sentence}_{idx}_{token['lemma']}"
-                    if st.button(token["display"], key=btn_key, use_container_width=True):
-                        now = time.time()
-                        last_key = f"_last_click_time_{book_name}_{sentence_id}"
-                        last_click_time = st.session_state.get(last_key)
-                        dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
-                        st.session_state[last_key] = now
-
-                        # [Fix-B] 直接从 token 的 deps_info 读取
-                        ev = _build_click_event(token, dwell_ms=dwell_ms)
-                        current_click_log.append(ev)
-                        st.session_state[click_cache_key] = current_click_log
-
-                        dep_summary = (
-                            f" → deps: {', '.join(d['deprel'] for d in ev['deps'])}"
-                            if ev['deps'] else " (no deps)"
-                        )
-                        st.success(f"Recorded: {token['display']}{dep_summary}")
-
-    if current_click_log:
-        st.caption(
-            f"Recorded clicks for this sentence: {len(current_click_log)} | "
-            f"Words: {', '.join(dict.fromkeys(ev.get('word','?') for ev in current_click_log))}"
-        )
-    else:
-        st.info("No word clicks recorded yet. Click the words above to create a log entry.")
-
     # ── 句子统计面板 ──
     with st.expander("📐 Sentence complexity metrics", expanded=False):
         m1, m2, m3 = st.columns(3)
