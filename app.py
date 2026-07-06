@@ -182,6 +182,15 @@ try:
 except ImportError:
     GRAPHVIZ_AVAILABLE = False
 
+def clean_word(word):
+    # 逻辑：先转小写，去除非字母数字和连字符，再去掉首尾多余符号
+    cleaned = re.sub(r"[^\w''\-]", "", word.lower())
+    cleaned = cleaned.strip("''-")
+    return cleaned
+
+def get_lemma_for_lookup(cleaned_word):
+    # 逻辑：去除用于匹配字典的特殊符号
+    return re.sub(r"[''`\-]", "", cleaned_word)
 #nltk.download('wordnet', quiet=True)
 #nltk.download('omw-1.4', quiet=True)
 #lemmatizer = WordNetLemmatizer()
@@ -942,19 +951,22 @@ def build_sentence_tokens(sentence_text: str,
     running_counter = Counter(freq_before)
     tokens = []
     for split_idx, word in enumerate(sentence_text.split()):
-        cleaned = re.sub(r"[^\w''\-]", "", word.lower())
-        cleaned = cleaned.strip("''-")
-        is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
+        #cleaned = re.sub(r"[^\w''\-]", "", word.lower())
+        #cleaned = cleaned.strip("''-")
+        cleaned = clean_word(word)  # 使用统一清洗
+        is_word = bool(re.search(r'[a-zA-Z]', cleaned))
+        #is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
         lemma = None
         freq  = 0
         deps_info = []
 
         if is_word:
-            for_lemma = re.sub(r"[''`\-]", "", cleaned)
+            for_lemma = get_lemma_for_lookup(cleaned)  # 使用统一提取
             if for_lemma:
                 lemma = cached_lemmatize(for_lemma)
-                running_counter[lemma] += 1
-                freq = running_counter[lemma]
+                # 【关键】确保这里的 key 处理与 data_loader 中存储时一致
+                lookup_key = lemma.lower().strip()
+                freq = global_freq_dict.get(lookup_key, 1)
 
             # [Fix-A] embed dep 信息：dep_map_by_position 的 key = dependent_id - 1
             # 这里用 split_idx（0-based 词序）作为 key，与 dependent_id-1 对应
@@ -995,194 +1007,153 @@ def _build_click_event(token: dict, dwell_ms: int = 0) -> dict:
 
 
 # ===================================================================
-# [Fix-A] 修复后的交互式句子 HTML 生成函数（接口不变，内部用 token.deps_info）
+# [NEW] Bi-directional Interactive Sentence Component Setup
 # ===================================================================
-def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_position,
-                                       sentence_id, core_lemmas, modifier_lemmas,
-                                       book_name, display_sentence, simplify_mode=None):
+import streamlit.components.v1 as components
 
-    def should_show_word(word_idx):
-        if simplify_mode is None:
-            return True
-        as_dep_rels = set()
-        if word_idx in dep_roles_by_position:
-            as_dep_rels = dep_roles_by_position[word_idx]['as_dependent']
-        if simplify_mode == 'svo_only':
-            core_rels = {'nsubj', 'nsubj:pass', 'obj', 'iobj', 'root', 'ROOT',
-                         'csubj', 'csubj:pass', 'ccomp', 'xcomp'}
-            return any(r in core_rels for r in as_dep_rels) or len(as_dep_rels) == 0
-        elif simplify_mode == 'no_amod':
-            return 'amod' not in as_dep_rels
-        elif simplify_mode == 'no_advmod':
-            return 'advmod' not in as_dep_rels and 'obl' not in as_dep_rels
-        elif simplify_mode == 'no_complement':
-            return not any(r in {'ccomp', 'xcomp', 'advcl'} for r in as_dep_rels)
-        return True
+COMPONENT_NAME = "interactive_sentence_v1"
+# Safely place it in the parent of LOGS_DIR to ensure it is always writable (works in Streamlit Cloud /tmp or local /opt)
+COMPONENT_DIR = LOGS_DIR.parent / "components" / COMPONENT_NAME
 
-    html_parts     = []
-    word_data_json = []
+#if not COMPONENT_DIR.exists():
+COMPONENT_DIR.mkdir(parents=True, exist_ok=True)
+html_path = COMPONENT_DIR / "index.html"
 
-    for idx, word_data in enumerate(words):
-        word  = word_data['display']
-        lemma = word_data.get('lemma')
-        freq  = word_data.get('freq', 0)
-
-        if lemma and not should_show_word(idx):
-            continue
-
-        if lemma:
-            color    = get_color(freq)
-            size_str, font = get_font_style_by_frequency(freq)
-            size     = int(size_str.replace('px', ''))
-            styles   = [f"color:{color}", f"font-size:{size}px",
-                        f"font-family:{font}", "cursor:pointer"]
-            if lemma in core_lemmas:     styles.append("font-weight:bold")
-            if lemma in modifier_lemmas: styles.append("font-style:italic")
-            style_str = "; ".join(styles)
-
-            # 用 token 里预存的 deps_info 构建 JS 数据（保持 iframe 高亮功能）
-            # dep_data = []
-            # if idx in dep_map_by_position:
-            #     for related_idx, deprel, related_lemma in dep_map_by_position[idx]:
-            #         dep_data.append({
-            #             'position': related_idx,
-            #             'lemma':    related_lemma,
-            #             'deprel':   deprel,
-            #         })
-
-            #  改为直接从 word_data 中读取预存的对齐数据：
-            dep_data = []
-            if 'deps_info' in word_data and word_data['deps_info']:
-                for dep_item in word_data['deps_info']:
-                    dep_data.append({
-                        'position': dep_item.get('position'),    # head 词的 0-based 位置
-                        'lemma':    dep_item.get('head_lemma'),  # head 词的 lemma
-                        'deprel':   dep_item.get('deprel'),
-                    })
-            word_data_json.append({
-                'idx': idx, 'lemma': lemma, 'word': word, 'deps': dep_data
-            })
-            html_parts.append(
-                f'<span class="word" data-idx="{idx}" '
-                f'data-lemma="{html.escape(lemma)}" '
-                f'style="{style_str}">{html.escape(word)}</span> '
-            )
-        # else:
-        #     html_parts.append(
-        #         f'<span style="color:#555555; font-size:15px; '
-        #         f'font-family:Merriweather">{html.escape(word)}</span> '
-        #     )
-        else:
-            # 将字号调整到 24px - 26px 左右，与主体视觉对齐
-            html_parts.append(
-                f'<span style="color:#555555; font-size:15px; '
-                f'font-family:Merriweather, serif">{html.escape(word)}</span> '
-            )
-
-    sentence_html = ''.join(html_parts)
-
-    full_html = f"""<!DOCTYPE html>
+# This JS bridge prevents default right-click menus and handles instantaneous DOM highlights
+html_content = """
+<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
+    <script src="https://cdn.jsdelivr.net/npm/streamlit-component-lib@1.3.0/dist/streamlit.js"></script>
     <style>
-        body {{
-            margin: 0; padding: 20px;
-            font-family: Arial, sans-serif; background: #F5E6C8;
-        }}
-        .sentence-container {{
+        body {
+            margin: 0; padding: 20px; font-family: Arial, sans-serif; background: #F5E6C8;
+        }
+        .sentence-container {
             font-size: 28px; line-height: 2.5; padding: 20px;
-            background: #F5E6C8; border-radius: 10px;
-            cursor: default; user-select: none;
-        }}
-        .word {{
-            transition: background-color 0.2s;
+            background: #F5E6C8; border-radius: 10px; cursor: default; user-select: none;
+        }
+        .word {
+            transition: background-color 0.2s, transform 0.1s;
             padding: 2px 4px; border-radius: 3px;
-        }}
-        .word:hover {{ background-color: #f0f0f0; }}
-        .dep-relation {{
+        }
+        .word:hover { background-color: #f0f0f0; transform: scale(1.05); }
+        .dep-relation {
             margin-top: 15px; padding: 15px; background: #e3f2fd;
-            border-radius: 8px; font-size: 16px;
-            border-left: 4px solid #2196F3; animation: fadeIn 0.3s;
-        }}
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(-10px); }}
-            to   {{ opacity: 1; transform: translateY(0); }}
-        }}
-        .relation-title {{ font-weight: bold; margin-bottom: 8px; color: #1976D2; }}
-        .relation-item  {{ margin: 5px 0; padding: 5px; background: white; border-radius: 4px; }}
+            border-radius: 8px; font-size: 16px; border-left: 4px solid #2196F3;
+            animation: fadeIn 0.3s;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .relation-title { font-weight: bold; margin-bottom: 8px; color: #1976D2; }
+        .relation-item  { margin: 5px 0; padding: 5px; background: white; border-radius: 4px; }
+        .hint { font-size: 14px; color: #555; margin-bottom: 10px; font-style: italic; }
     </style>
 </head>
 <body>
-    <div class="sentence-container" id="sentenceContainer">
-        {sentence_html}
-    </div>
+    <div class="hint">🖱️ <b>Left-click</b> a word to highlight dependencies & record log. &nbsp;|&nbsp; 🖱️ <b>Right-click</b> to add to wordbook.</div>
+    <div class="sentence-container" id="sentenceContainer"></div>
     <div id="depRelationContainer"></div>
 
     <script>
-        const wordData     = {json.dumps(word_data_json)};
-        const deprelLabels = {json.dumps(DEPREL_LABELS)};
+        let elements = [];
+        let wordData = [];
+        let deprelLabels = {};
 
-        const idxToElement = new Map();
-        wordData.forEach(d => {{
-            const el = document.querySelector(`.word[data-idx="${{d.idx}}"]`);
-            if (el) idxToElement.set(d.idx, el);
-        }});
-
-        document.querySelectorAll('.word').forEach(el => {{
-            el.addEventListener('click', function(e) {{
-                e.stopPropagation();
-                handleClick(this);
-            }});
-        }});
-
-        function handleClick(element) {{
-            clearHighlights();
-            const idx  = parseInt(element.dataset.idx);
-            const data = wordData.find(d => d.idx === idx);
-            if (!data) return;
-
-            element.style.outline = '3px solid #39FF14';
-            data.deps.forEach(dep => {{
-                const relEl = idxToElement.get(dep.position);
-                if (relEl) relEl.style.outline = '3px solid #39FF14';
-            }});
-
-            if (data.deps.length > 0) showDependencies(data);
-        }}
-
-        function showDependencies(data) {{
-            const container = document.getElementById('depRelationContainer');
-            container.innerHTML = '';
-            const div = document.createElement('div');
-            div.className = 'dep-relation';
-            let h = '<div class="relation-title">Dependency relations:</div>';
-            data.deps.forEach(dep => {{
-                const note  = deprelLabels[dep.deprel] || dep.deprel;
-                const label = (note !== dep.deprel)
-                    ? note + ' (' + dep.deprel + ')' : dep.deprel;
-                h += `<div class="relation-item">
-                    <strong>${{data.word}}</strong>
-                    ──${{label}}──&gt;
-                    <strong>${{dep.lemma}}</strong>
-                    </div>`;
-            }});
-            div.innerHTML = h;
-            container.appendChild(div);
-        }}
-
-        function clearHighlights() {{
-            document.querySelectorAll('.word').forEach(w => w.style.outline = '');
+        function clearHighlights() {
+            elements.forEach(el => { if(el) el.style.outline = ''; });
             document.getElementById('depRelationContainer').innerHTML = '';
-        }}
+        }
 
-        document.addEventListener('click', function(e) {{
-            if (!e.target.classList.contains('word')) clearHighlights();
-        }});
+        function handleLeftClick(data, el) {
+            clearHighlights();
+            el.style.outline = '3px solid #39FF14';
+            data.deps.forEach(dep => {
+                const relEl = elements[dep.position];
+                if (relEl) relEl.style.outline = '3px solid #39FF14';
+            });
+
+            if (data.deps && data.deps.length > 0) {
+                const container = document.getElementById('depRelationContainer');
+                const div = document.createElement('div');
+                div.className = 'dep-relation';
+                let h = '<div class="relation-title">🔗 Dependency relations:</div>';
+                data.deps.forEach(dep => {
+                    const note  = deprelLabels[dep.deprel] || dep.deprel;
+                    const label = (note !== dep.deprel) ? note + ' (' + dep.deprel + ')' : dep.deprel;
+                    h += `<div class="relation-item">
+                        <strong>${data.word}</strong> ──${label}──&gt; <strong>${dep.lemma}</strong>
+                        </div>`;
+                });
+                div.innerHTML = h;
+                container.appendChild(div);
+            }
+
+            Streamlit.setFrameHeight();
+            // Send event to Python backend instantly
+            Streamlit.setComponentValue({ action: "left_click", data: data, ts: Date.now() });
+        }
+
+        function handleRightClick(data) {
+            // Send wordbook action to Python backend
+            Streamlit.setComponentValue({ action: "right_click", data: data, ts: Date.now() });
+        }
+
+        function onRender(event) {
+            const args = event.detail.args;
+            wordData = args.words;
+            deprelLabels = args.deprelLabels;
+
+            // Re-render DOM only if the sentence or simplify mode changes (prevents flickering on click)
+            if (window.lastSentenceId !== args.sentenceId || window.lastSimplifyMode !== args.simplifyMode) {
+                window.lastSentenceId = args.sentenceId;
+                window.lastSimplifyMode = args.simplifyMode;
+
+                const container = document.getElementById("sentenceContainer");
+                container.innerHTML = "";
+                document.getElementById("depRelationContainer").innerHTML = "";
+                elements = [];
+
+                wordData.forEach((d) => {
+                    const span = document.createElement("span");
+                    span.style.cssText = d.style;
+                    span.textContent = d.word + " ";
+
+                    if (d.clickable) {
+                        span.className = "word";
+                        // Left click
+                        span.addEventListener("click", (e) => {
+                            e.preventDefault();
+                            handleLeftClick(d, span);
+                        });
+                        // Right click
+                        span.addEventListener("contextmenu", (e) => {
+                            e.preventDefault(); 
+                            handleRightClick(d);
+                        });
+                    }
+
+                    container.appendChild(span);
+                    elements[d.idx] = span; 
+                });
+            }
+            Streamlit.setFrameHeight();
+        }
+
+        Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+        Streamlit.setComponentReady();
+        Streamlit.setFrameHeight();
     </script>
 </body>
-</html>"""
-    return full_html
+</html>
+"""
+html_path.write_text(html_content, encoding="utf-8")
+
+# Register the component
+interactive_sentence_comp = components.declare_component(COMPONENT_NAME, path=str(COMPONENT_DIR))
 
 
 # ===================================================================
@@ -1576,15 +1547,123 @@ with tab1:
             st.rerun()
 
     # ── 渲染交互句子 ──
-    interactive_html = generate_interactive_sentence_html(
-        sentence_tokens, dep_map_by_position, dep_roles_by_position,
-        sentence_id, core_lemmas, modifier_lemmas,
-        book_name, display_sentence, st.session_state.get('simplify_mode'))
-    components.html(interactive_html, height=400, scrolling=True)
+    # ── 渲染双向交互句子组件 ──
+    def should_show_word(word_idx):
+        simplify_mode = st.session_state.get('simplify_mode')
+        if simplify_mode is None:
+            return True
+        as_dep_rels = set()
+        if word_idx in dep_roles_by_position:
+            as_dep_rels = dep_roles_by_position[word_idx]['as_dependent']
+        if simplify_mode == 'svo_only':
+            core_rels = {'nsubj', 'nsubj:pass', 'obj', 'iobj', 'root', 'ROOT',
+                         'csubj', 'csubj:pass', 'ccomp', 'xcomp'}
+            return any(r in core_rels for r in as_dep_rels) or len(as_dep_rels) == 0
+        elif simplify_mode == 'no_amod':
+            return 'amod' not in as_dep_rels
+        elif simplify_mode == 'no_advmod':
+            return 'advmod' not in as_dep_rels and 'obl' not in as_dep_rels
+        elif simplify_mode == 'no_complement':
+            return not any(r in {'ccomp', 'xcomp', 'advcl'} for r in as_dep_rels)
+        return True
 
-    # ── Word click tracker ──
-    st.markdown("**🖱 Click words below to record the log:**")
-    valid_tokens = [(idx, t) for idx, t in enumerate(sentence_tokens) if t.get("lemma")]
+
+    # 1. 准备传递给前端的高级 JSON 数据
+    word_data_json = []
+    for idx, word_data in enumerate(sentence_tokens):
+        word = word_data['display']
+        lemma = word_data.get('lemma')
+        freq = word_data.get('freq', 0)
+
+        if lemma and not should_show_word(idx):
+            continue
+
+        if lemma:
+            color = get_color(freq)
+            size_str, font = get_font_style_by_frequency(freq)
+            size = int(size_str.replace('px', ''))
+            styles = [f"color:{color}", f"font-size:{size}px",
+                      f"font-family:{font}", "cursor:pointer"]
+            if lemma in core_lemmas:     styles.append("font-weight:bold")
+            if lemma in modifier_lemmas: styles.append("font-style:italic")
+            style_str = "; ".join(styles)
+
+            dep_data = []
+            if 'deps_info' in word_data and word_data['deps_info']:
+                for dep_item in word_data['deps_info']:
+                    dep_data.append({
+                        'position': dep_item.get('position'),
+                        'lemma': dep_item.get('head_lemma'),
+                        'deprel': dep_item.get('deprel'),
+                    })
+            word_data_json.append({
+                'idx': idx, 'lemma': lemma, 'word': word, 'deps': dep_data,
+                'style': style_str, 'clickable': True
+            })
+        else:
+            style_str = "color:#555555; font-size:15px; font-family:Merriweather, serif"
+            word_data_json.append({
+                'idx': idx, 'word': word, 'style': style_str, 'clickable': False
+            })
+
+    # 2. 调用自定义组件，监听双向事件
+    event = interactive_sentence_comp(
+        words=word_data_json,
+        deprelLabels=DEPREL_LABELS,
+        sentenceId=f"{book_name}_{sentence_id}",
+        simplifyMode=st.session_state.get('simplify_mode', 'full'),
+        key=f"comp_{book_name}_{sentence_id}"  # key binds to current sentence
+    )
+
+    # 3. 处理前端传回来的点击交互
+    if event:
+        ts = event.get("ts")
+        last_ts_key = f"last_ts_{book_name}_{sentence_id}"
+
+        # Guard: Ensures we don't process the identical event twice on unrelated reruns
+        if ts and st.session_state.get(last_ts_key) != ts:
+            st.session_state[last_ts_key] = ts
+
+            action = event.get("action")
+            data = event.get("data", {})
+
+            # [左键] -> 高亮 (前端已处理) + 后台记录行为日志
+            if action == "left_click":
+                token = next((t for t in sentence_tokens if
+                              t.get('lemma') == data.get('lemma') and t.get('display') == data.get('word')), None)
+                if token:
+                    now = time.time()
+                    last_key = f"_last_click_time_{book_name}_{sentence_id}"
+                    last_click_time = st.session_state.get(last_key)
+                    dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
+                    st.session_state[last_key] = now
+
+                    ev = _build_click_event(token, dwell_ms=dwell_ms)
+                    current_click_log.append(ev)
+                    st.session_state[click_cache_key] = current_click_log
+
+            # [右键] -> 后台添加生词本 + 浮动提示(Toast)不破坏页面布局
+            elif action == "right_click":
+                lemma = data.get('lemma')
+                word = data.get('word')
+                entry = {"book": book_name, "lemma": lemma, "word": word}
+                if entry not in st.session_state.user_wordbook:
+                    st.session_state.user_wordbook.append(entry)
+                    st.toast(f"✅ Added '{word}' to the wordbook.", icon="📖")
+                    save_progress()
+                else:
+                    st.toast(f"ℹ️ '{word}' is already in the wordbook.", icon="📌")
+
+    # 静态提示区 (取代原来庞大的按钮网格)
+    if current_click_log:
+        st.caption(
+            f"✅ Recorded {len(current_click_log)} clicks for this sentence: "
+            f"{', '.join(dict.fromkeys(ev.get('word', '?') for ev in current_click_log))}"
+        )
+    else:
+        st.info("No word clicks recorded yet. Left-click a word to create a log entry.")
+
+
 
     # [诊断] 显示当前句有多少个 token 有 deps_info
     tokens_with_deps = [(idx, t) for idx, t in valid_tokens if t.get("deps_info")]
@@ -1738,8 +1817,8 @@ with tab1:
     # ── 加词到词汇本 ──
     if sentence_tokens:
         st.markdown("---")
-        st.markdown("**💾 Add to wordbook (click words):**")
-        valid_tokens_wb = [t for t in sentence_tokens if t.get('lemma')]
+        # st.markdown("**💾 Add to wordbook (click words):**")
+        # valid_tokens_wb = [t for t in sentence_tokens if t.get('lemma')]
         if valid_tokens_wb:
             cols_per_row = 6
             for i in range(0, len(valid_tokens_wb), cols_per_row):
