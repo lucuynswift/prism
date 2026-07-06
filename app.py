@@ -1771,29 +1771,7 @@ with tab1:
     #     st.audio(st.session_state[tts_audio_key], format="audio/mp3")
 
     # ── 加词到词汇本 ──
-    if sentence_tokens:
-        st.markdown("---")
-        # st.markdown("**💾 Add to wordbook (click words):**")
-        # valid_tokens_wb = [t for t in sentence_tokens if t.get('lemma')]
-        if valid_tokens_wb:
-            cols_per_row = 6
-            for i in range(0, len(valid_tokens_wb), cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j, token in enumerate(valid_tokens_wb[i:i + cols_per_row]):
-                    with cols[j]:
-                        btn_key = f"add_{book_name}_{display_sentence}_{token['lemma']}_{i+j}"
-                        if st.button(token['display'], key=btn_key,
-                                     use_container_width=True,
-                                     help=f"Click to add '{token['display']}' to the wordbook"):
-                            entry = {"book": book_name,
-                                     "lemma": token['lemma'],
-                                     "word":  token['display']}
-                            if entry not in st.session_state.user_wordbook:
-                                st.session_state.user_wordbook.append(entry)
-                                st.success(f"✅ Added '{token['display']}' to the wordbook.")
-                                save_progress()
-                            else:
-                                st.info(f"'{token['display']}' is already in the wordbook.")
+
 
     st.caption(
         f"Viewing sentence {display_sentence + 1} / {total_sentences} "
