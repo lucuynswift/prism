@@ -64,15 +64,30 @@ def render_auth_sidebar():
     if st.session_state.get("current_user"):
         st.sidebar.success(
             f"✅ Logged in as **{st.session_state['current_user']}**")
+        # if st.sidebar.button("Log out"):
+        #     st.session_state["current_user"] = None
+        #     st.session_state["auth_token"]   = None
+        #     # ── 同步重置 app.py 门禁依赖的两个键 ──
+        #     st.session_state["is_logged_in"] = False
+        #     st.session_state["username"]     = "guest"
+        #     st.session_state.pop("_subscription_cache",      None)
+        #     st.session_state.pop("_subscription_cache_time", None)
+        #     st.session_state.pop("sub", None)
+        #     st.rerun()
         if st.sidebar.button("Log out"):
             st.session_state["current_user"] = None
-            st.session_state["auth_token"]   = None
+            st.session_state["auth_token"] = None
+            st.session_state["token"] = None  # ✨ 顺便清除通用 token
             # ── 同步重置 app.py 门禁依赖的两个键 ──
             st.session_state["is_logged_in"] = False
-            st.session_state["username"]     = "guest"
-            st.session_state.pop("_subscription_cache",      None)
+            st.session_state["username"] = "guest"
+            st.session_state.pop("_subscription_cache", None)
             st.session_state.pop("_subscription_cache_time", None)
             st.session_state.pop("sub", None)
+
+            # ── ✨ 核心强化：擦除旧用户的单词本和进度缓存，防止换号登录时产生数据污染 ──
+            st.session_state.pop("user_wordbook", None)
+            st.session_state.pop("user_progress", None)
             st.rerun()
         return
 
@@ -88,12 +103,21 @@ def render_auth_sidebar():
             else:
                 ok, data = api_post("login",
                                     {"email": email, "password": password})
+                # if ok:
+                #     st.session_state["current_user"] = data["username"]
+                #     st.session_state["auth_token"]   = data["token"]
+                #     # ── 同步 app.py 门禁依赖的两个键 ──
+                #     st.session_state["is_logged_in"] = True
+                #     st.session_state["username"]     = data["username"]
+                #     st.rerun()
                 if ok:
                     st.session_state["current_user"] = data["username"]
-                    st.session_state["auth_token"]   = data["token"]
+                    st.session_state["auth_token"] = data["token"]
+                    # ── ✨ 核心对齐：确保 app.py 的 save/load_progress 能顺利拿到 token ──
+                    st.session_state["token"] = data["token"]
                     # ── 同步 app.py 门禁依赖的两个键 ──
                     st.session_state["is_logged_in"] = True
-                    st.session_state["username"]     = data["username"]
+                    st.session_state["username"] = data["username"]
                     st.rerun()
                 else:
                     st.error(data.get("detail", "Login failed."))

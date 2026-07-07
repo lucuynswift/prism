@@ -809,11 +809,91 @@ def reset_default_session_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
-def save_progress():
-    pass  # 正式版进度存 session_state，此函数保留供原有调用点兼容
+# def save_progress():
+#     pass  # 正式版进度存 session_state，此函数保留供原有调用点兼容
 
+def save_progress():
+    """
+    Saves user reading progress and wordbook data.
+    Synchronizes with the remote FastAPI server to achieve permanent persistence.
+    """
+    username = st.session_state.get("username")
+    token = st.session_state.get("token")
+
+    if not username or not token:
+        print("Save skipped: User not logged in or token missing.")
+        return False
+
+    # 💡 Please replace with your actual FastAPI endpoint URL
+
+    # 动态获取当前配置的 FastAPI 基础路径，自动适配本地测试或线上环境
+    AUTH_BASE = st.secrets["AUTH_BASE_URL"]
+
+    # 拼接成完整的 API 路径
+    FASTAPI_SAVE_URL = f"{AUTH_BASE}/api/user/update_progress"
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        # Pack the data to be synchronized to the cloud database
+        payload = {
+            "username": username,
+            "wordbook": st.session_state.get("user_wordbook", []),
+            "progress": st.session_state.get("user_progress", {})
+        }
+
+        # Send data to the remote server via POST request
+        response = requests.post(FASTAPI_SAVE_URL, json=payload, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            print("Successfully synced progress and wordbook to FastAPI.")
+            return True
+        else:
+            print(f"FastAPI sync returned error code: {response.status_code}, detail: {response.text}")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"Network exception during FastAPI sync: {e}")
+        return False
+
+# def load_progress():
+#     pass  # 正式版进度存 session_state，此函数保留供原有调用点兼容
 def load_progress():
-    pass  # 正式版进度存 session_state，此函数保留供原有调用点兼容
+    """
+    Loads user reading progress and wordbook data from the remote FastAPI server.
+    Ensures state synchronization across devices and sessions.
+    """
+    username = st.session_state.get("username")
+    token = st.session_state.get("token")
+
+    if not username or not token:
+        print("Load skipped: User not logged in or token missing.")
+        return False
+
+    # ── 💡 动态读取您刚才找到并配置好的基础路径 ──
+    AUTH_BASE = st.secrets["AUTH_BASE_URL"]
+    FASTAPI_LOAD_URL = f"{AUTH_BASE}/api/user/get_progress?username={username}"
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}"
+        }
+        response = requests.get(FASTAPI_LOAD_URL, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            data = response.json()
+            # Synchronize cloud data back into Streamlit memory state
+            st.session_state["user_wordbook"] = data.get("wordbook", [])
+            st.session_state["user_progress"] = data.get("progress", {})
+            print("Successfully loaded progress and wordbook from FastAPI.")
+            return True
+        else:
+            print(f"FastAPI load returned error code: {response.status_code}, detail: {response.text}")
+            return False
+    except Exception as e:
+        print(f"Network exception during FastAPI load: {e}")
+        return False
 
 def text_to_speech_bytes(text: str, voice: str = "en-US-JennyNeural") -> bytes | None:
     async def _run():
@@ -957,7 +1037,8 @@ def build_sentence_tokens(sentence_text: str,
 
                 # 👈 核心改动：直接从预计算的字典中，用单词在句中的位置 (split_idx) 获取历史频次
                 # 哪怕一个句子里有两个相同的词，由于位置不同，频次也会极其精准！
-                freq = current_sentence_freqs.get(split_idx, 1)
+
+                freq = current_sentence_freqs.get(split_idx + 1, current_sentence_freqs.get(split_idx, 1))
 
             # embed dep 信息保持不变
             if dep_map_by_position is not None:
@@ -1041,24 +1122,59 @@ def _process_iframe_word_action(
             if ev['deps'] else " (no deps)"
         )
         return f"✅ Recorded: {token['display']}"
+
+
+
+    # === Find the action == "wb" branch and replace with this ===
     if action == "wb":
+        # Safety check: prevent errors if lemma is missing
         lemma = token.get("lemma")
-        if not lemma: return "⚠️ Error: Invalid word"
+        if not lemma:
+            return f"⚠️ Could not recognize the lemma for: {token['display']}"
 
-        entry = {"book": book_name, "lemma": lemma, "word": token["display"]}
+        lemma_lower = lemma.lower().strip()
+        entry = {
+            "book": book_name,
+            "lemma": lemma_lower,
+            "word": token["display"].strip()
+        }
 
-        # 检查是否已存在
-        if any(e['lemma'] == lemma for e in st.session_state.user_wordbook):
-            return f"⚠️ '{token['display']}' is already in your wordbook."
+        # Check if the word already exists in the wordbook (matching by lemma)
+        if any(e.get('lemma') == lemma_lower for e in st.session_state.user_wordbook):
+            return f"ℹ️ '{token['display']}' is already in your wordbook."
 
+        # Append to the local session state memory first
         st.session_state.user_wordbook.append(entry)
-        # 使用 try-except 保护保存过程
-        try:
-            save_progress()
-        except Exception as e:
-            return f"❌ Save failed: {e}"
 
-        return f"✅ Added '{token['display']}' to wordbook!"
+        # Trigger the enhanced save progress function (Local backup + FastAPI sync)
+        try:
+            save_success = save_progress()
+            if save_success:
+                return f"✅ Successfully added '{token['display']}' to wordbook!"
+            else:
+                # If save_progress returns False, the server sync encountered an issue
+                return f"⚠️ Added locally, but failed to sync with cloud server. Please refresh and try again."
+        except Exception as e:
+            # Catch any unexpected crash due to connection drops
+            return f"❌ Save failed due to server or network error: {e}"
+    # if action == "wb":
+    #     lemma = token.get("lemma")
+    #     if not lemma: return "⚠️ Error: Invalid word"
+    #
+    #     entry = {"book": book_name, "lemma": lemma, "word": token["display"]}
+    #
+    #     # 检查是否已存在
+    #     if any(e['lemma'] == lemma for e in st.session_state.user_wordbook):
+    #         return f"⚠️ '{token['display']}' is already in your wordbook."
+    #
+    #     st.session_state.user_wordbook.append(entry)
+    #     # 使用 try-except 保护保存过程
+    #     try:
+    #         save_progress()
+    #     except Exception as e:
+    #         return f"❌ Save failed: {e}"
+    #
+    #     return f"✅ Added '{token['display']}' to wordbook!"
 
     # if action == "wb":
     #     entry = {"book": book_name, "lemma": token["lemma"], "word": token["display"]}
@@ -1730,25 +1846,41 @@ with tab1:
     #         st.session_state[f"_flash_{book_name}_{display_sentence}"] = flash_msg
     #     st.rerun()
     # --- 修改后的处理逻辑 ---
-    if st.query_params.get("_ic"):
-        # 获取原始动作数据
-        raw_ic = st.query_params["_ic"]
+    # if st.query_params.get("_ic"):
+    #     # 获取原始动作数据
+    #     raw_ic = st.query_params["_ic"]
+    #
+    #     # 执行处理逻辑
+    #     flash_msg = _process_iframe_word_action(
+    #         raw_ic,
+    #         sentence_tokens,
+    #         click_cache_key,
+    #         book_name,
+    #         sentence_id,
+    #         display_sentence,
+    #     )
+    #
+    #     # 【方案3修改点】：不再使用动态 key，统一存入 'global_toast'
+    #     if flash_msg:
+    #         st.session_state["global_toast"] = flash_msg
+    #
+    #     # 清理参数并重绘
+    #     del st.query_params["_ic"]
+    #     st.rerun()
 
-        # 执行处理逻辑
+    if st.query_params.get("_ic"):
         flash_msg = _process_iframe_word_action(
-            raw_ic,
+            st.query_params["_ic"],
             sentence_tokens,
             click_cache_key,
             book_name,
             sentence_id,
             display_sentence,
         )
-
-        # 【方案3修改点】：不再使用动态 key，统一存入 'global_toast'
+        # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
         if flash_msg:
             st.session_state["global_toast"] = flash_msg
 
-        # 清理参数并重绘
         del st.query_params["_ic"]
         st.rerun()
 
