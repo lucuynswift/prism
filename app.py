@@ -1077,31 +1077,35 @@ def _build_click_event(token: dict, dwell_ms: int = 0) -> dict:
         "dwell_ms":  dwell_ms,
     }
 
-
 def _process_iframe_word_action(
-    query_value: str,
-    sentence_tokens: list,
-    click_cache_key: str,
-    book_name: str,
-    sentence_id: int,
-    display_sentence: int,
+        query_value: str,
+        sentence_tokens: list,
+        click_cache_key: str,
+        book_name: str,
+        sentence_id: int,
+        display_sentence: int,
 ) -> str | None:
-    """处理 iframe 内左键（记录日志）/ 右键（加入单词本）回传。"""
-    st.write(f"DEBUG: Action received: {action}, Token: {token.get('display')}")
+    """Process iframe left-click (log) / right-click (wordbook) actions."""
+
+    # 1. 必须先安全解析前端传来的 JSON 数据
     try:
         payload = json.loads(query_value)
     except (json.JSONDecodeError, TypeError):
         return None
 
+    # 2. 提取动作类型 (a) 和单词索引 (i)
     action = payload.get("a")
     idx = payload.get("i")
+
     if not isinstance(idx, int) or idx < 0 or idx >= len(sentence_tokens):
         return None
 
+    # 3. 获取对应的单词字典
     token = sentence_tokens[idx]
     if not token.get("lemma"):
         return None
 
+    # --- 左键逻辑：记录点击日志 ---
     if action == "log":
         sel_key = f"_selected_word_{book_name}_{display_sentence}"
         st.session_state[sel_key] = idx
@@ -1117,20 +1121,14 @@ def _process_iframe_word_action(
         current_click_log.append(ev)
         st.session_state[click_cache_key] = current_click_log
 
-        dep_summary = (
-            f" → deps: {', '.join(d['deprel'] for d in ev['deps'])}"
-            if ev['deps'] else " (no deps)"
-        )
+        # 返回给 global_toast 的成功提示
         return f"✅ Recorded: {token['display']}"
 
-
-
-    # === Find the action == "wb" branch and replace with this ===
+    # --- 右键逻辑：加入单词本 ---
     if action == "wb":
-        # Safety check: prevent errors if lemma is missing
         lemma = token.get("lemma")
         if not lemma:
-            return f"⚠️ Could not recognize the lemma for: {token['display']}"
+            return "⚠️ Could not recognize the lemma for this word."
 
         lemma_lower = lemma.lower().strip()
         entry = {
@@ -1139,24 +1137,25 @@ def _process_iframe_word_action(
             "word": token["display"].strip()
         }
 
-        # Check if the word already exists in the wordbook (matching by lemma)
+        # 检查是否已存在
         if any(e.get('lemma') == lemma_lower for e in st.session_state.user_wordbook):
             return f"ℹ️ '{token['display']}' is already in your wordbook."
 
-        # Append to the local session state memory first
+        # 加入本地缓存
         st.session_state.user_wordbook.append(entry)
 
-        # Trigger the enhanced save progress function (Local backup + FastAPI sync)
+        # 尝试云端同步
         try:
             save_success = save_progress()
             if save_success:
                 return f"✅ Successfully added '{token['display']}' to wordbook!"
             else:
-                # If save_progress returns False, the server sync encountered an issue
-                return f"⚠️ Added locally, but failed to sync with cloud server. Please refresh and try again."
+                return f"⚠️ Added locally, but failed to sync with cloud server."
         except Exception as e:
-            # Catch any unexpected crash due to connection drops
-            return f"❌ Save failed due to server or network error: {e}"
+            return f"❌ Save failed due to network error: {e}"
+
+    return None
+
     # if action == "wb":
     #     lemma = token.get("lemma")
     #     if not lemma: return "⚠️ Error: Invalid word"
