@@ -68,32 +68,41 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
     all_sids = [int(r['sentence_id']) for r in lemma_pos_rows if r.get('sentence_id')]
     min_sid = min(all_sids) if all_sids else 1
 
-    # ── 3. 构建 all_sentence_lemmas ──
+    # ── 3. 构建核心字典：全书词频统计 与 O(1) 前端查表 ──
     all_sentence_lemmas = [[] for _ in range(num_sentences)]
-
-    # 🌟 在遍历的同时，直接顺便把预计算好的全局词频（global_frequency）提取出来
     global_freq_dict = {}
     lemma_by_sid = defaultdict(list)
 
+    # ✨ 核心新增：专门给前端 TAB 1 准备的 O(1) 位置-频次映射表
+    # 结构：{ sentence_id: { local_word_id: freq } }
+    lemma_freq_by_pos = defaultdict(dict)
+
     for r in lemma_pos_rows:
-        sid = int(r['sentence_id'])
         try:
+            sid = int(r['sentence_id'])
             local_id = int(r['local_word_id'])
         except (ValueError, KeyError):
-            local_id = 0
+            continue
 
         lemma = r.get('lemma', '')
         lemma_by_sid[sid].append((local_id, lemma))
 
-        # 🌟 核心优化 1：直接获取第二列预计算好的全局词频，避免后续重复用 Counter 现场去数
+        # 🌟 提取预计算好的动态词频
+        try:
+            freq = int(r.get('global_frequency', 1))
+        except (ValueError, TypeError):
+            freq = 1
+
+        # 组装给前端的 O(1) 字典（前提：这里的 local_id 需要和 frontend 的 split_idx 对齐，通常都是 0-based）
+        lemma_freq_by_pos[sid][local_id] = freq
+
+        # 🌟 计算全书最终词频（供 TAB 3 词汇宇宙使用）
+        # 既然 freq 是动态累积的，那么只要不断取最大值，循环结束时它自然就是该词在全书的总频次！
         if lemma:
             lemma_lower = lemma.lower().strip()
-            #if lemma_lower and lemma_lower not in global_freq_dict:
-            try:
-                global_freq_dict[lemma_lower] = int(r.get('global_frequency', 1))
-            except (ValueError, TypeError):
-                global_freq_dict[lemma_lower] = 1
+            global_freq_dict[lemma_lower] = max(global_freq_dict.get(lemma_lower, 0), freq)
 
+    # 提取并过滤纯字母组成的 all_sentence_lemmas
     for sid, pairs in lemma_by_sid.items():
         idx = sid - min_sid
         if 0 <= idx < num_sentences:
@@ -101,26 +110,15 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
             all_sentence_lemmas[idx] = [
                 l.lower().strip()
                 for _, l in pairs
-                if l and l.strip() and l.strip().isalpha()  # 过滤标点、数字，只保留纯字母词
+                if l and l.strip() and l.strip().isalpha()
             ]
 
-    # ── 4. 彻底移除原来导致 OOM 的 Counter(all_flat_lemmas) 全局统计代码 ──
-    # 原本这里的代码已被上面第 3 步的全局预计算提取完美取代 🌟
+    # ── 4. 🧹 彻底移除旧版累加逻辑 ──
+    # 删除了原来臃肿的 sentence_deltas
+    # 删除了原来吃内存的 sparse_prefix_counters
+    # 我们用轻量级的 lemma_freq_by_pos 完美取代了它们！
 
-    # ── 5. 核心优化 2：前缀和向量（稀疏化改造，极限节省内存） ──
-    sentence_deltas = [Counter(sent) for sent in all_sentence_lemmas]
-
-    sparse_prefix_counters = {}
-    STEP = 50  # 步长设为 50，即每 50 句保存一个词频快照检查点
-    current_cum = Counter()
-
-    for idx, delta in enumerate(sentence_deltas):
-        current_cum.update(delta)
-        # 只在能被 STEP 整除的句法行上进行 .copy() 存档
-        if idx % STEP == 0:
-            sparse_prefix_counters[idx] = current_cum.copy()
-
-    # ── 6. 依存索引（保持原有高效索引逻辑不变） ──
+    # ── 5. 依存索引（保持原有高效索引逻辑不变） ──
     dep_index = defaultdict(list)
     if dep_rows:
         has_dep_lemma = 'dependent_lemma' in dep_rows[0]
@@ -133,7 +131,7 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
             w_lemma = r.get(key_col, '').lower().strip()
             dep_index[(sid, w_lemma)].append(r)
 
-    # ── 7. dep_by_sid：按 sentence_id 聚合 ──
+    # ── 6. dep_by_sid：按 sentence_id 聚合 ──
     dep_by_sid: dict = defaultdict(list)
     for r in dep_rows:
         try:
@@ -141,16 +139,25 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
         except (ValueError, KeyError):
             pass
 
+    # ── 7. 将准备好的数据返回给 Streamlit 前端 ──
     # 返回全新的、极简瘦身后的数据结构
     return {
         "slug": slug,
         "sentences": sentences,
         "all_sentence_lemmas": all_sentence_lemmas,
-        "sentence_deltas": sentence_deltas,
-        "sparse_prefix_counters": sparse_prefix_counters,  # 🌟 改为传出稀疏检查点字典
-        "prefix_step": STEP,  # 🌟 传出步长控制参数
-        "global_freq_dict": global_freq_dict,  # 🌟 完美预计算词频
+
+        # ❌ 彻底移除这三个旧的内存刺客：
+        # "sentence_deltas": sentence_deltas,
+        # "sparse_prefix_counters": sparse_prefix_counters,
+        # "prefix_step": STEP,
+
+        # ✅ 换成这个神级优化字典（它记录了每一句、每一个单词位置对应的预计算词频）：
+        "lemma_positions": lemma_freq_by_pos,
+
+        "global_freq_dict": global_freq_dict,
         "dep_rows": dep_rows,
         "dep_index": dict(dep_index),
         "dep_by_sid": dict(dep_by_sid),
     }
+
+

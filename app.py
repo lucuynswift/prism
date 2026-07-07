@@ -923,68 +923,59 @@ def append_behavior_record(username: str, record: dict):
 #                            dep_map_by_position: dict | None = None) -> list:
 
 def build_sentence_tokens(sentence_text: str,
-                          sentence_deltas: list,
                           display_sentence: int,
                           dep_map_by_position: dict | None = None,
-                          prefix_counters: list | None = None) -> list:  # 👈 1. 参入传入前缀和
-
+                          current_sentence_freqs: dict | None = None) -> list:
     """
     返回 token 列表，每个 token 包含：
       display   : 原始词（含标点）
       lemma     : 词元（None 表示标点/非字母词）
-      freq      : 历史出现频次
-      deps_info : list[dict]，每条包含 head_lemma / deprel / pair 三个字段
-                  （仅当 dep_map_by_position 不为 None 且该 token 有依存时非空）
+      freq      : 历史出现频次（直接从预计算的 O(1) 字典中读取）
+      deps_info : list[dict]，包含依存关系
     """
     if not sentence_text:
         return []
-    # freq_before = sum(sentence_deltas[:display_sentence], Counter())
-    # running_counter = Counter(freq_before)
-    # tokens = []
 
-    # 👈 2. 彻底抛弃旧的 sum 累加，改为 O(1) 查表。若无前缀和（兼容老架构）则兜底
-    if prefix_counters is not None and display_sentence < len(prefix_counters):
-        freq_before = prefix_counters[display_sentence]
-    else:
-        freq_before = sum(sentence_deltas[:display_sentence], Counter())
+    # 兜底：如果没有传入当前句的频次字典，给一个空字典防报错
+    if current_sentence_freqs is None:
+        current_sentence_freqs = {}
 
-    running_counter = Counter(freq_before)
     tokens = []
+
+    # 彻底抛弃旧的 sum 累加和 Counter，直接遍历分词
     for split_idx, word in enumerate(sentence_text.split()):
-        #cleaned = re.sub(r"[^\w''\-]", "", word.lower())
-        #cleaned = cleaned.strip("''-")
-        cleaned = clean_word(word)  # 使用统一清洗
+        cleaned = clean_word(word)
         is_word = bool(re.search(r'[a-zA-Z]', cleaned))
-        #is_word = bool(re.search(r'[a-zA-Z]', cleaned)) if cleaned else False
         lemma = None
-        freq  = 0
+        freq = 0
         deps_info = []
 
         if is_word:
-            for_lemma = get_lemma_for_lookup(cleaned)  # 使用统一提取
+            for_lemma = get_lemma_for_lookup(cleaned)
             if for_lemma:
                 lemma = cached_lemmatize(for_lemma)
-                # 【关键】确保这里的 key 处理与 data_loader 中存储时一致
-                lookup_key = lemma.lower().strip()
-                freq = global_freq_dict.get(lookup_key, 1)
 
-            # [Fix-A] embed dep 信息：dep_map_by_position 的 key = dependent_id - 1
-            # 这里用 split_idx（0-based 词序）作为 key，与 dependent_id-1 对应
+                # 👈 核心改动：直接从预计算的字典中，用单词在句中的位置 (split_idx) 获取历史频次
+                # 哪怕一个句子里有两个相同的词，由于位置不同，频次也会极其精准！
+                freq = current_sentence_freqs.get(split_idx, 1)
+
+            # embed dep 信息保持不变
             if dep_map_by_position is not None:
                 for related_idx, deprel, related_lemma in dep_map_by_position.get(split_idx, []):
                     deps_info.append({
                         "head_lemma": str(related_lemma),
-                        "deprel":     str(deprel),
-                        "position":   related_idx,          # ← head 词在句中的 0-based 位置，JS 高亮需要
-                        "pair":       f"{word} → {related_lemma} ({deprel})",
+                        "deprel": str(deprel),
+                        "position": related_idx,
+                        "pair": f"{word} → {related_lemma} ({deprel})",
                     })
 
         tokens.append({
-            "display":   word,
-            "lemma":     lemma,
-            "freq":      freq,
-            "deps_info": deps_info,   # 新增字段
+            "display": word,
+            "lemma": lemma,
+            "freq": freq,
+            "deps_info": deps_info,
         })
+
     return tokens
 
 
@@ -1015,6 +1006,7 @@ def _process_iframe_word_action(
     display_sentence: int,
 ) -> str | None:
     """处理 iframe 内左键（记录日志）/ 右键（加入单词本）回传。"""
+    st.write(f"DEBUG: Action received: {action}, Token: {token.get('display')}")
     try:
         payload = json.loads(query_value)
     except (json.JSONDecodeError, TypeError):
@@ -1048,16 +1040,34 @@ def _process_iframe_word_action(
             f" → deps: {', '.join(d['deprel'] for d in ev['deps'])}"
             if ev['deps'] else " (no deps)"
         )
-        return f"Recorded: {token['display']}{dep_summary}"
-
+        return f"✅ Recorded: {token['display']}"
     if action == "wb":
-        entry = {"book": book_name, "lemma": token["lemma"], "word": token["display"]}
-        if entry not in st.session_state.user_wordbook:
-            st.session_state.user_wordbook.append(entry)
-            save_progress()
-            return f"✅ Added '{token['display']}' to the wordbook."
-        return f"'{token['display']}' is already in the wordbook."
+        lemma = token.get("lemma")
+        if not lemma: return "⚠️ Error: Invalid word"
 
+        entry = {"book": book_name, "lemma": lemma, "word": token["display"]}
+
+        # 检查是否已存在
+        if any(e['lemma'] == lemma for e in st.session_state.user_wordbook):
+            return f"⚠️ '{token['display']}' is already in your wordbook."
+
+        st.session_state.user_wordbook.append(entry)
+        # 使用 try-except 保护保存过程
+        try:
+            save_progress()
+        except Exception as e:
+            return f"❌ Save failed: {e}"
+
+        return f"✅ Added '{token['display']}' to wordbook!"
+
+    # if action == "wb":
+    #     entry = {"book": book_name, "lemma": token["lemma"], "word": token["display"]}
+    #     if entry not in st.session_state.user_wordbook:
+    #         st.session_state.user_wordbook.append(entry)
+    #         save_progress()
+    #         return f"✅ Added '{token['display']}' to the wordbook."
+    #
+    #     return f"📖 Added to wordbook: {token['display']}"
     return None
 
 
@@ -1401,7 +1411,10 @@ else:
     daily_count = 0
     count_key   = None
 # ─────────────────────────────────────────────────────────────────────
-
+# --- 【插入位置】：此处是渲染主体的入口 ---
+if "global_toast" in st.session_state:
+    msg = st.session_state.pop("global_toast")
+    st.toast(msg, icon="🔔")
 # ── 书籍选择（来自 book_registry.py）──
 st.sidebar.markdown("---")
 st.sidebar.title("📚 Book Library")
@@ -1627,13 +1640,30 @@ with tab1:
     st.caption(f"Current mode: {mode_names.get(st.session_state.simplify_mode, 'Full sentence')}")
 
     # ── [Fix-A] 构建 sentence_tokens，同时传入 dep_map_by_position ──
-    sentence_tokens     = build_sentence_tokens(
-        sentence_text,
-        data["sentence_deltas"],
-        display_sentence,
-        dep_map_by_position,
-        data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
+    # ── [Fix-A] 构建 sentence_tokens，直接传入预计算频次 ──
+
+    # 1. 从你的全局 data 中，安全获取预计算的动态词频数据
+    all_lemma_positions = data.get("lemma_positions", {})
+
+    # 2. 精准提取【当前句子】的所有单词频次，传给函数
+    # 结构预期是：{ 0: 频次, 1: 频次, 2: 频次 ... }，键是单词在句中的索引
+    current_sentence_freqs = all_lemma_positions.get(sentence_id, {})
+
+    # 3. 极简调用
+    sentence_tokens = build_sentence_tokens(
+        sentence_text=sentence_text,
+        display_sentence=display_sentence,
+        dep_map_by_position=dep_map_by_position,
+        current_sentence_freqs=current_sentence_freqs  # 👈 传入查好的字典
     )
+
+    # sentence_tokens     = build_sentence_tokens(
+    #     sentence_text,
+    #     data["sentence_deltas"],
+    #     display_sentence,
+    #     dep_map_by_position,
+    #     data.get("prefix_counters")  # 👈 传入缓存的预计算前缀和
+    # )
     sentence_word_count = len(sentence_text.split()) if sentence_text else 0
 
     # ── 点击日志缓存 ──
@@ -1686,19 +1716,42 @@ with tab1:
     sel_key = f"_selected_word_{book_name}_{display_sentence}"
     selected_word_idx = st.session_state.get(sel_key, -1)
 
+    # if st.query_params.get("_ic"):
+    #     flash_msg = _process_iframe_word_action(
+    #         st.query_params["_ic"],
+    #         sentence_tokens,
+    #         click_cache_key,
+    #         book_name,
+    #         sentence_id,
+    #         display_sentence,
+    #     )
+    #     del st.query_params["_ic"]
+    #     if flash_msg:
+    #         st.session_state[f"_flash_{book_name}_{display_sentence}"] = flash_msg
+    #     st.rerun()
+    # --- 修改后的处理逻辑 ---
     if st.query_params.get("_ic"):
+        # 获取原始动作数据
+        raw_ic = st.query_params["_ic"]
+
+        # 执行处理逻辑
         flash_msg = _process_iframe_word_action(
-            st.query_params["_ic"],
+            raw_ic,
             sentence_tokens,
             click_cache_key,
             book_name,
             sentence_id,
             display_sentence,
         )
-        del st.query_params["_ic"]
+
+        # 【方案3修改点】：不再使用动态 key，统一存入 'global_toast'
         if flash_msg:
-            st.session_state[f"_flash_{book_name}_{display_sentence}"] = flash_msg
+            st.session_state["global_toast"] = flash_msg
+
+        # 清理参数并重绘
+        del st.query_params["_ic"]
         st.rerun()
+
 
     interactive_html = generate_interactive_sentence_html(
         sentence_tokens, dep_map_by_position, dep_roles_by_position,
