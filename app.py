@@ -38,6 +38,20 @@ import csv
 # SINGLE_DIR = Path("/opt/prism/app/vocabulary/single")
 # COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
 
+# 这段 JS 放在你的页面渲染逻辑中，用于监听消息并传回 Python
+components.html(f"""
+    <script>
+        window.addEventListener("message", function(event) {{
+            if (event.data && event.data.type === "PRISM_ACTION") {{
+                // 因为 Streamlit 没有直接的 JS-to-Python 传值通道，
+                // 我们通过更新 URL 参数来变相触达 Python
+                const url = new URL(window.location.href);
+                url.searchParams.set('_ic', event.data.data);
+                window.location.href = url.toString();
+            }}
+        }});
+    </script>
+""", height=0)
 # 1. 定义真正的项目根目录（当前 app.py 所在的目录，两边环境都通用）
 APP_ROOT = Path(__file__).resolve().parent
 
@@ -1087,23 +1101,26 @@ def _process_iframe_word_action(
 ) -> str | None:
     """Process iframe left-click (log) / right-click (wordbook) actions."""
 
-    # 1. 必须先安全解析前端传来的 JSON 数据
+    # 1. 捕捉 JSON 解析错误
     try:
         payload = json.loads(query_value)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    except Exception as e:
+        return f"⚠️ JSON decode error: {e}"
 
-    # 2. 提取动作类型 (a) 和单词索引 (i)
     action = payload.get("a")
     idx = payload.get("i")
 
-    if not isinstance(idx, int) or idx < 0 or idx >= len(sentence_tokens):
-        return None
+    # 2. 捕捉索引类型或越界错误
+    if not isinstance(idx, int):
+        return f"⚠️ Error: Index is not an integer ({idx})"
+    if idx < 0 or idx >= len(sentence_tokens):
+        return f"⚠️ Error: Index out of bounds ({idx})"
 
-    # 3. 获取对应的单词字典
     token = sentence_tokens[idx]
+
+    # 3. 捕捉因为没有 Lemma 导致的被忽略（以前是静默 return None）
     if not token.get("lemma"):
-        return None
+        return f"ℹ️ '{token.get('display', '?')}' ignored (No lemma available)"
 
     # --- 左键逻辑：记录点击日志 ---
     if action == "log":
@@ -1121,15 +1138,11 @@ def _process_iframe_word_action(
         current_click_log.append(ev)
         st.session_state[click_cache_key] = current_click_log
 
-        # 返回给 global_toast 的成功提示
         return f"✅ Recorded: {token['display']}"
 
     # --- 右键逻辑：加入单词本 ---
     if action == "wb":
         lemma = token.get("lemma")
-        if not lemma:
-            return "⚠️ Could not recognize the lemma for this word."
-
         lemma_lower = lemma.lower().strip()
         entry = {
             "book": book_name,
@@ -1144,17 +1157,17 @@ def _process_iframe_word_action(
         # 加入本地缓存
         st.session_state.user_wordbook.append(entry)
 
-        # 尝试云端同步
+        # 捕捉网络同步错误
         try:
             save_success = save_progress()
             if save_success:
                 return f"✅ Successfully added '{token['display']}' to wordbook!"
             else:
-                return f"⚠️ Added locally, but failed to sync with cloud server."
+                return f"⚠️ Added locally, but failed to sync with cloud."
         except Exception as e:
-            return f"❌ Save failed due to network error: {e}"
+            return f"❌ Network error during save: {e}"
 
-    return None
+    return f"⚠️ Unknown action received: {action}"
 
     # if action == "wb":
     #     lemma = token.get("lemma")
@@ -1349,14 +1362,18 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
         function notifyParent(action, idx) {{
             try {{
                 const payload = JSON.stringify({{a: action, i: idx}});
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set('_ic', payload);
-                window.parent.location.href = url.toString();
+                
+                window.parent.postMessage({{
+                    type: "PRISM_ACTION",
+                    data: payload
+                }}, "*");
             }} catch (err) {{
                 console.warn('Could not notify Streamlit parent:', err);
             }}
         }}
-
+     
+        
+        
         function handleClick(element) {{
             clearHighlights(false);
             const idx  = parseInt(element.dataset.idx, 10);
