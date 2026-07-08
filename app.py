@@ -41,13 +41,20 @@ import csv
 # 这段 JS 放在你的页面渲染逻辑中，用于监听消息并传回 Python
 components.html(f"""
     <script>
-        window.addEventListener("message", function(event) {{
+        window.parent.addEventListener("message", function(event) {{
             if (event.data && event.data.type === "PRISM_ACTION") {{
                 // 因为 Streamlit 没有直接的 JS-to-Python 传值通道，
                 // 我们通过更新 URL 参数来变相触达 Python
-                const url = new URL(window.location.href);
+                // ⚠️ 关键修复：这段脚本本身也运行在 components.html 生成的
+                // 隐藏 iframe 里，是主页面（顶层 window）的兄弟 iframe，而不是父级。
+                // 单词点击 iframe 是用 window.parent.postMessage(...) 发消息给"顶层页面"的，
+                // 所以这里必须监听 window.parent 而不是自己的 window，
+                // 否则这个监听器永远收不到消息。
+                // 同理，下面跳转也必须改成 window.parent.location，
+                // 否则只是让这个看不见的 0 高度 iframe 自己跳转，主页面 URL 根本不会变。
+                const url = new URL(window.parent.location.href);
                 url.searchParams.set('_ic', event.data.data);
-                window.location.href = url.toString();
+                window.parent.location.href = url.toString();
             }}
         }});
     </script>
@@ -120,20 +127,54 @@ import edge_tts
 
 async def do_tts(text: str, voice: str = "en-US-ChristopherNeural") -> str:
     """
-    使用 edge_tts 生成语音并保存到临时文件，返回该文件的【路径字符串】
+    使用 edge_tts 生成语音，返回该文件的【路径字符串】。
+
+    ✅ 修复：原来每次点击都用 tempfile.NamedTemporaryFile(delete=False)
+    生成一个全新随机文件名的 mp3，且从未删除——单进程长期运行下，
+    /tmp 里的音频文件会无限堆积，迟早把磁盘写满。
+    现在改成按 (voice, text) 的 MD5 做磁盘缓存：
+      · 同一句子 + 同一音色重复点击，直接复用已生成的文件，
+        不用重复调用 edge_tts，真正做到"秒回"；
+      · 文件名固定（不再是随机 tempfile 名），天然去重，
+        增长速度从"每次点击 +1 个文件"降到"每个不同句子+音色组合 +1 个文件"；
+      · 顺手做一次机会式清理：每次调用有 2% 概率顺带清掉 30 天没
+        被重新生成过的旧缓存文件，避免缓存目录无限增长，也不用
+        额外部署定时任务。
     """
-    import tempfile
-    import edge_tts
+    import random
 
-    # 1. 创建一个安全的临时文件，获取它的绝对路径字符串
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-        tmp_path = tmp_file.name
+    cache_dir = Path(tempfile.gettempdir()) / "prism_tts_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. 实例化 edge_tts 并使用自带的 .save() 方法直接将音频写入该路径
+    cache_key = hashlib.md5(f"{voice}::{text}".encode("utf-8")).hexdigest()
+    tmp_path = str(cache_dir / f"{cache_key}.mp3")
+
+    # 已经生成过同样的句子+音色 → 直接复用，不再重复请求 edge_tts
+    if Path(tmp_path).exists():
+        return tmp_path
+
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(tmp_path)
 
-    return tmp_path  # 👈 返回的是字符串路径，例如 "/tmp/tmpxyz123.mp3"
+    # 机会式清理：不用每次都扫盘，2% 概率触发一次就够了
+    if random.random() < 0.02:
+        _cleanup_old_tts_cache(cache_dir)
+
+    return tmp_path  # 👈 返回的是字符串路径，例如 "/tmp/prism_tts_cache/<md5>.mp3"
+
+
+def _cleanup_old_tts_cache(cache_dir: Path, max_age_days: int = 30):
+    """机会式清理：顺手删掉太久没被访问/重新生成过的旧 TTS 缓存文件，避免磁盘无限增长。"""
+    cutoff = time.time() - max_age_days * 86400
+    try:
+        for f in cache_dir.glob("*.mp3"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 # ------------------- 依存标签英文注释 -------------------
 DEPREL_LABELS = {
     "nsubj": "subject",
@@ -910,13 +951,24 @@ def load_progress():
         return False
 
 def text_to_speech_bytes(text: str, voice: str = "en-US-JennyNeural") -> bytes | None:
+    """
+    ✅ 修复：这里跟 do_tts 不一样——调用方只需要内存里的 bytes，
+    不需要保留文件路径给 st.audio 反复读取，所以读完就可以立刻删除临时文件，
+    不会再产生和 do_tts 同样的"永不清理"磁盘泄漏。
+    """
     async def _run():
         communicate = edge_tts.Communicate(text, voice)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
             tmp_path = f.name
-        await communicate.save(tmp_path)
-        with open(tmp_path, "rb") as fh:
-            return fh.read()
+        try:
+            await communicate.save(tmp_path)
+            with open(tmp_path, "rb") as fh:
+                return fh.read()
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
     try:
         return asyncio.run(_run())
     except Exception:
@@ -1442,7 +1494,11 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
 
 # ── 1. 全局核心 Session State 初始化 ──
 if "current_user" not in st.session_state:
-    st.session_state.current_user = "paddle_reviewer"  # ← 未登录时是 None，不能是 True
+    # ✅ 修复：之前这里被写成了字符串 "paddle_reviewer"（真值），
+    # 导致每一个全新访客都被自动当成"已登录用户 paddle_reviewer"放行，
+    # 登录/注册表单也不会出现——所有匿名访客其实共享同一个账号。
+    # 未登录时必须是 None，才能触发下面的登录门禁。
+    st.session_state.current_user = None
 
 # ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
 render_auth_sidebar()
@@ -1584,7 +1640,7 @@ if not sub["subscribed"] and not in_trial and daily_count >= FREE_DAILY_LIMIT:
 # _mtime 让缓存感知服务器文件更新，上传新数据后无需重启即可生效
 with st.spinner(f"Loading {book_choice}…"):
     _book_mtime = _get_dir_mtime(Path(book_info["repo"]))
-    data = load_book_from_server(book_name, book_info["repo"], _mtime=_book_mtime)
+    data = load_book_from_server(book_name, book_info["repo"], mtime=_book_mtime)
 
 if not data:
     st.error("Failed to load book data. Please try again later.")

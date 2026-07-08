@@ -42,10 +42,16 @@ def _read_csv(path: Path) -> list:
 
 
 @st.cache_resource(show_spinner="⚡ Loading precomputed book vectors...")
-def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict:
+def load_book_from_server(slug: str, repo_url: str, mtime: float = 0.0) -> dict:
     """
-    _mtime 以下划线开头，Streamlit 不将其纳入缓存键比较，
-    但调用方每次传入最新的文件修改时间，值变化时强制触发缓存重建。
+    ✅ 修复：mtime 不再以下划线开头。
+    Streamlit 的 cache_resource/cache_data 会把「下划线开头」的参数
+    直接排除在缓存键之外——也就是说它们的值无论怎么变，都不会触发缓存重建。
+    之前这里叫 _mtime，本意是想靠它的变化强制刷新缓存，
+    结果恰好被 Streamlit 的这条规则完全反向作用：缓存一旦建立就永远不会失效，
+    服务器上的 CSV 更新了也没用，只能重启 Streamlit 进程才能看到新数据。
+    去掉下划线后，mtime 正常参与缓存键计算，文件一变、哈希就变、
+    缓存自动重建，不用重启进程。
     """
     # 高性能书籍加载器：原生 Python（csv + collections），不依赖 pandas。
     book_dir = Path(repo_url)
@@ -159,5 +165,3 @@ def load_book_from_server(slug: str, repo_url: str, _mtime: float = 0.0) -> dict
         "dep_index": dict(dep_index),
         "dep_by_sid": dict(dep_by_sid),
     }
-
-
