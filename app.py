@@ -39,26 +39,7 @@ import csv
 # COMBINED_DIR = Path("/opt/prism/app/vocabulary/combined")
 
 # 这段 JS 放在你的页面渲染逻辑中，用于监听消息并传回 Python
-components.html(f"""
-    <script>
-        window.parent.addEventListener("message", function(event) {{
-            if (event.data && event.data.type === "PRISM_ACTION") {{
-                // 因为 Streamlit 没有直接的 JS-to-Python 传值通道，
-                // 我们通过更新 URL 参数来变相触达 Python
-                // ⚠️ 关键修复：这段脚本本身也运行在 components.html 生成的
-                // 隐藏 iframe 里，是主页面（顶层 window）的兄弟 iframe，而不是父级。
-                // 单词点击 iframe 是用 window.parent.postMessage(...) 发消息给"顶层页面"的，
-                // 所以这里必须监听 window.parent 而不是自己的 window，
-                // 否则这个监听器永远收不到消息。
-                // 同理，下面跳转也必须改成 window.parent.location，
-                // 否则只是让这个看不见的 0 高度 iframe 自己跳转，主页面 URL 根本不会变。
-                const url = new URL(window.parent.location.href);
-                url.searchParams.set('_ic', event.data.data);
-                window.parent.location.href = url.toString();
-            }}
-        }});
-    </script>
-""", height=0)
+
 # 1. 定义真正的项目根目录（当前 app.py 所在的目录，两边环境都通用）
 APP_ROOT = Path(__file__).resolve().parent
 
@@ -1411,19 +1392,22 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
             }});
         }});
 
+
         function notifyParent(action, idx) {{
             try {{
+        
                 const payload = JSON.stringify({{a: action, i: idx}});
-                
-                window.parent.postMessage({{
-                    type: "PRISM_ACTION",
-                    data: payload
-                }}, "*");
+        
+        
+                const url = new URL(window.parent.location.href);
+                url.searchParams.set('_ic', payload);
+        
+    
+                window.parent.location.href = url.toString();
             }} catch (err) {{
-                console.warn('Could not notify Streamlit parent:', err);
+                console.error("前端 JS 报错: ", err.message);
             }}
         }}
-     
         
         
         function handleClick(element) {{
@@ -1940,23 +1924,45 @@ with tab1:
     #     del st.query_params["_ic"]
     #     st.rerun()
 
-    if st.query_params.get("_ic"):
-        flash_msg = _process_iframe_word_action(
-            st.query_params["_ic"],
-            sentence_tokens,
-            click_cache_key,
-            book_name,
-            sentence_id,
-            display_sentence,
+    # if st.query_params.get("_ic"):
+    #     flash_msg = _process_iframe_word_action(
+    #         st.query_params["_ic"],
+    #         sentence_tokens,
+    #         click_cache_key,
+    #         book_name,
+    #         sentence_id,
+    #         display_sentence,
+    #     )
+    #     # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
+    #     if flash_msg:
+    #         st.session_state["global_toast"] = flash_msg
+    #
+    #     del st.query_params["_ic"]
+    #     st.rerun()
+    # ============================================================
+    # 【直接接收器】：放在 app.py 顶部（import 之后，页面渲染之前）
+    # ============================================================
+    query_params = st.query_params
+    if "_ic" in query_params:
+        query_value = query_params["_ic"]
+
+        # 调用处理逻辑
+        result = _process_iframe_word_action(
+            query_value,
+            st.session_state.current_sentence_tokens,
+            f"_click_log_{st.session_state.book_name}",
+            st.session_state.book_name,
+            st.session_state.sentence_id,
+            st.session_state.display_sentence
         )
-        # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
-        if flash_msg:
-            st.session_state["global_toast"] = flash_msg
 
-        del st.query_params["_ic"]
-        st.rerun()
+        # 弹出提示
+        if result:
+            st.toast(result)
 
-
+        # 处理完必须清空，否则刷新页面会死循环重复触发！
+        st.query_params.clear()
+#====================================================================================================================
     interactive_html = generate_interactive_sentence_html(
         sentence_tokens, dep_map_by_position, dep_roles_by_position,
         sentence_id, core_lemmas, modifier_lemmas,
