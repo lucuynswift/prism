@@ -1389,26 +1389,30 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                     if (e.button !== 0) return; 
                     e.stopPropagation();
                     
+                    if (clickTimer) clearTimeout(clickTimer);
+                    clickTimer = setTimeout(() => {{
                     
-                    try {{
-                        if (typeof handleClick === 'function') {{
-                            handleClick(el); 
+                        try {{
+                            if (typeof handleClick === 'function') {{
+                                handleClick(el); 
+                            }}
+                        }} catch (err) {{
+                            console.error('handleClick 内部报错了，但我们将继续通知后端:', err);
                         }}
-                    }} catch (err) {{
-                        console.error('handleClick 内部报错了，但我们将继续通知后端:', err);
-                    }}
-                    
-
-                    notifyParent('log', parseInt(el.dataset.idx, 10));
+                        notifyParent('log', parseInt(el.dataset.idx, 10));
+                    }}, 250);
                 }});
-
                 
                 el.addEventListener('dblclick', function(e) {{
                     e.stopPropagation();
+                    if (clickTimer) {{
+                        clearTimeout(clickTimer);
+                        clickTimer = null;
+                    }}
                     notifyParent('wb', parseInt(this.dataset.idx, 10));
                 }});
             }});
-        }});
+        }});    
 
 
         function notifyParent(action, idx) {{
@@ -1417,7 +1421,8 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 const payload = JSON.stringify({{a: action, i: idx}});
         
         
-                const url = new URL(window.parent.location.href);
+                const parentUrl = document.referrer || window.location.href;
+                const url = new URL(parentUrl);
                 url.searchParams.set('_ic', payload);
         
     
