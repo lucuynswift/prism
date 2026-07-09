@@ -1377,18 +1377,36 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
             const el = document.querySelector(`.word[data-idx="${{d.idx}}"]`);
             if (el) idxToElement.set(d.idx, el);
         }});
+       
+       
+        window.addEventListener('load', function() {{
+            const words = document.querySelectorAll('.word');
+            console.log('找到单词标签数量:', words.length); // 调试日志，按 F12 可以在控制台看到
+    
+            words.forEach(el => {{
+        
+                el.addEventListener('click', function(e) {{
+                    if (e.button !== 0) return; 
+                    e.stopPropagation();
+                    
+                    
+                    try {{
+                        if (typeof handleClick === 'function') {{
+                            handleClick(el); 
+                        }}
+                    }} catch (err) {{
+                        console.error('handleClick 内部报错了，但我们将继续通知后端:', err);
+                    }}
+                    
 
-        document.querySelectorAll('.word').forEach(el => {{
-            el.addEventListener('click', function(e) {{
-                if (e.button !== 0) return;
-                e.stopPropagation();
-                handleClick(this);
-                notifyParent('log', parseInt(this.dataset.idx, 10));
-            }});
-            el.addEventListener('contextmenu', function(e) {{
-                e.preventDefault();
-                e.stopPropagation();
-                notifyParent('wb', parseInt(this.dataset.idx, 10));
+                    notifyParent('log', parseInt(el.dataset.idx, 10));
+                }});
+
+                
+                el.addEventListener('dblclick', function(e) {{
+                    e.stopPropagation();
+                    notifyParent('wb', parseInt(this.dataset.idx, 10));
+                }});
             }});
         }});
 
@@ -1586,7 +1604,8 @@ else:
 # --- 【插入位置】：此处是渲染主体的入口 ---
 if "global_toast" in st.session_state:
     msg = st.session_state.pop("global_toast")
-    st.toast(msg, icon="🔔")
+    if msg:
+        st.toast(msg, icon="🔔")
 # ── 书籍选择（来自 book_registry.py）──
 st.sidebar.markdown("---")
 st.sidebar.title("📚 Book Library")
@@ -1901,7 +1920,7 @@ with tab1:
     #     if flash_msg:
     #         st.session_state[f"_flash_{book_name}_{display_sentence}"] = flash_msg
     #     st.rerun()
-    # --- 修改后的处理逻辑 ---
+    ## --- 修改后的处理逻辑 ---
     # if st.query_params.get("_ic"):
     #     # 获取原始动作数据
     #     raw_ic = st.query_params["_ic"]
@@ -1924,44 +1943,44 @@ with tab1:
     #     del st.query_params["_ic"]
     #     st.rerun()
 
-    # if st.query_params.get("_ic"):
-    #     flash_msg = _process_iframe_word_action(
-    #         st.query_params["_ic"],
-    #         sentence_tokens,
-    #         click_cache_key,
-    #         book_name,
-    #         sentence_id,
-    #         display_sentence,
-    #     )
-    #     # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
-    #     if flash_msg:
-    #         st.session_state["global_toast"] = flash_msg
-    #
-    #     del st.query_params["_ic"]
-    #     st.rerun()
-    # ============================================================
-    # 【直接接收器】：放在 app.py 顶部（import 之后，页面渲染之前）
-    # ============================================================
-    query_params = st.query_params
-    if "_ic" in query_params:
-        query_value = query_params["_ic"]
-
-        # 调用处理逻辑
-        result = _process_iframe_word_action(
-            query_value,
-            st.session_state.current_sentence_tokens,
-            f"_click_log_{st.session_state.book_name}",
-            st.session_state.book_name,
-            st.session_state.sentence_id,
-            st.session_state.display_sentence
+    if st.query_params.get("_ic"):
+        flash_msg = _process_iframe_word_action(
+            st.query_params["_ic"],
+            sentence_tokens,
+            click_cache_key,
+            book_name,
+            sentence_id,
+            display_sentence,
         )
+        # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
+        if flash_msg:
+            st.session_state["global_toast"] = flash_msg
 
-        # 弹出提示
-        if result:
-            st.toast(result)
-
-        # 处理完必须清空，否则刷新页面会死循环重复触发！
-        st.query_params.clear()
+        del st.query_params["_ic"]
+        st.rerun()
+    #============================================================
+    #【直接接收器】：放在 app.py 顶部（import 之后，页面渲染之前）
+    #============================================================
+    # query_params = st.query_params
+    # if "_ic" in query_params:
+    #     query_value = query_params["_ic"]
+    #
+    #     # 调用处理逻辑
+    #     result = _process_iframe_word_action(
+    #         query_value,
+    #         st.session_state.current_sentence_tokens,
+    #         f"_click_log_{st.session_state.book_name}",
+    #         st.session_state.book_name,
+    #         st.session_state.sentence_id,
+    #         st.session_state.display_sentence
+    #     )
+    #
+    #     # 弹出提示
+    #     if result:
+    #         st.toast(result)
+    #
+    #     # 处理完必须清空，否则刷新页面会死循环重复触发！
+    #     st.query_params.clear()
 #====================================================================================================================
     interactive_html = generate_interactive_sentence_html(
         sentence_tokens, dep_map_by_position, dep_roles_by_position,
