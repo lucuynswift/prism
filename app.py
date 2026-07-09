@@ -1321,177 +1321,186 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
     sentence_html = ''.join(html_parts)
 
     full_html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{
-            margin: 0; padding: 20px;
-            font-family: Arial, sans-serif; background: #F5E6C8;
-        }}
-        .sentence-container {{
-            font-size: 28px; line-height: 2.5; padding: 20px;
-            background: #F5E6C8; border-radius: 10px;
-            cursor: default; user-select: none;
-        }}
-        .word {{
-            transition: background-color 0.2s;
-            padding: 2px 4px; border-radius: 3px;
-        }}
-        .word:hover {{ background-color: #f0f0f0; }}
-        .dep-relation {{
-            margin-top: 15px; padding: 15px; background: #e3f2fd;
-            border-radius: 8px; font-size: 16px;
-            border-left: 4px solid #2196F3; animation: fadeIn 0.3s;
-        }}
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(-10px); }}
-            to   {{ opacity: 1; transform: translateY(0); }}
-        }}
-        .relation-title {{ font-weight: bold; margin-bottom: 8px; color: #1976D2; }}
-        .relation-item  {{ margin: 5px 0; padding: 5px; background: white; border-radius: 4px; }}
-        .hint-bar {{
-            margin-bottom: 10px; padding: 8px 12px; background: #fff8e1;
-            border-radius: 6px; font-size: 13px; color: #795548;
-            border-left: 3px solid #ffb300;
-        }}
-    </style>
-</head>
-<body>
-    <div class="hint-bar">
-        🖱️ Left-click: highlight dependencies &amp; log &nbsp;|&nbsp;
-        Right-click: add to wordbook
-    </div>
-    <div class="sentence-container" id="sentenceContainer">
-        {sentence_html}
-    </div>
-    <div id="depRelationContainer"></div>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{
+                margin: 0; padding: 20px;
+                font-family: Arial, sans-serif; background: #F5E6C8;
+            }}
+            .sentence-container {{
+                font-size: 28px; line-height: 2.5; padding: 20px;
+                background: #F5E6C8; border-radius: 10px;
+                cursor: default; user-select: none;
+            }}
+            .word {{
+                transition: background-color 0.2s;
+                padding: 2px 4px; border-radius: 3px;
+            }}
+            .word:hover {{ background-color: #f0f0f0; }}
+            .dep-relation {{
+                margin-top: 15px; padding: 15px; background: #e3f2fd;
+                border-radius: 8px; font-size: 16px;
+                border-left: 4px solid #2196F3; animation: fadeIn 0.3s;
+            }}
+            @keyframes fadeIn {{
+                from {{ opacity: 0; transform: translateY(-10px); }}
+                to   {{ opacity: 1; transform: translateY(0); }}
+            }}
+            .relation-title {{ font-weight: bold; margin-bottom: 8px; color: #1976D2; }}
+            .relation-item  {{ margin: 5px 0; padding: 5px; background: white; border-radius: 4px; }}
+            .hint-bar {{
+                margin-bottom: 10px; padding: 8px 12px; background: #fff8e1;
+                border-radius: 6px; font-size: 13px; color: #795548;
+                border-left: 3px solid #ffb300;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="hint-bar">
+            🖱️ 鼠标单击: 瞬间查看依存关系（丝滑不闪烁） &nbsp;|&nbsp;
+            ✨ 鼠标双击: 强力加入单词本
+        </div>
+        <div class="sentence-container" id="sentenceContainer">
+            {sentence_html}
+        </div>
+        <div id="depRelationContainer"></div>
 
-    <script>
-        const wordData     = {json.dumps(word_data_json)};
-        const deprelLabels = {json.dumps(DEPREL_LABELS)};
-        const selectedIdx  = {selected_word_idx};
+        <script>
+            const wordData     = {json.dumps(word_data_json)};
+            const deprelLabels = {json.dumps(DEPREL_LABELS)};
+            const selectedIdx  = {selected_word_idx};
 
-        const idxToElement = new Map();
-        wordData.forEach(d => {{
-            const el = document.querySelector(`.word[data-idx="${{d.idx}}"]`);
-            if (el) idxToElement.set(d.idx, el);
-        }});
-       
-       
-        window.addEventListener('load', function() {{
-            const words = document.querySelectorAll('.word');
-            console.log('找到单词标签数量:', words.length); // 调试日志，按 F12 可以在控制台看到
-    
-            words.forEach(el => {{
-        
-                el.addEventListener('click', function(e) {{
-                    if (e.button !== 0) return; 
-                    e.stopPropagation();
-                    
-                    if (clickTimer) clearTimeout(clickTimer);
-                    clickTimer = setTimeout(() => {{
-                    
-                        try {{
-                            if (typeof handleClick === 'function') {{
-                                handleClick(el); 
+            const idxToElement = new Map();
+            wordData.forEach(d => {{
+                const el = document.querySelector(`.word[data-idx="${{d.idx}}"]`);
+                if (el) idxToElement.set(d.idx, el);
+            }});
+
+            // 全局定时器，用来完美隔离单击和双击
+            let clickTimer = null;
+
+            window.addEventListener('load', function() {{
+                const words = document.querySelectorAll('.word');
+                console.log('找到单词标签数量:', words.length);
+
+                words.forEach(el => {{
+                    // 1. 🔥【重大修改】左键单击：纯前端本地高亮，绝不刷新网页！
+                    el.addEventListener('click', function(e) {{
+                        if (e.button !== 0) return; 
+                        e.stopPropagation();
+
+                        if (clickTimer) clearTimeout(clickTimer);
+
+                        // 延迟 220ms 执行，给双击留出判断时间
+                        clickTimer = setTimeout(() => {{
+                            try {{
+                                if (typeof handleClick === 'function') {{
+                                    handleClick(el); // 瞬间在前端激活动态特效与依存面板
+                                }}
+                            }} catch (err) {{
+                                console.error('handleClick 内部报错了:', err);
                             }}
-                        }} catch (err) {{
-                            console.error('handleClick 内部报错了，但我们将继续通知后端:', err);
+
+                            // 💡 注意：此处不再调用会摧毁页面的 notifyParent('log')。
+                            // 如果你后面需要收集点击日志，可以在这里使用前端 fetch() 异步静默发送给你的 FastAPI 后端，
+                            // 这样既能存下日志，又绝对不会刷新和破坏当前的 Streamlit 页面。
+
+                        }}, 220); 
+                    }});
+
+                    // 2. 双击：加入生词本（允许同步数据并重载页面）
+                    el.addEventListener('dblclick', function(e) {{
+                        e.stopPropagation();
+
+                        // 一旦确认为双击，立刻扼杀掉刚才单击留在队列里的延时任务
+                        if (clickTimer) {{
+                            clearTimeout(clickTimer);
+                            clickTimer = null;
                         }}
-                        notifyParent('log', parseInt(el.dataset.idx, 10));
-                    }}, 250);
-                }});
-                
-                el.addEventListener('dblclick', function(e) {{
-                    e.stopPropagation();
-                    if (clickTimer) {{
-                        clearTimeout(clickTimer);
-                        clickTimer = null;
-                    }}
-                    notifyParent('wb', parseInt(this.dataset.idx, 10));
+
+                        // 执行通知流，加入生词本
+                        notifyParent('wb', parseInt(this.dataset.idx, 10));
+                    }});
                 }});
             }});
-        }});    
 
 
-        function notifyParent(action, idx) {{
-            try {{
-        
-                const payload = JSON.stringify({{a: action, i: idx}});
-        
-        
-                const parentUrl = document.referrer || window.location.href;
-                const url = new URL(parentUrl);
-                url.searchParams.set('_ic', payload);
-        
-    
-                window.parent.location.href = url.toString();
-            }} catch (err) {{
-                console.error("前端 JS 报错: ", err.message);
+            // 突破自建服务器沙箱限制的跳转函数
+            function notifyParent(action, idx) {{
+                try {{
+                    const payload = JSON.stringify({{a: action, i: idx}});
+                    const parentUrl = document.referrer || window.location.href;
+                    const url = new URL(parentUrl);
+                    url.searchParams.set('_ic', payload);
+
+                    // 仅在双击生词本时，命令最外层主浏览器跳转重载
+                    window.top.location.href = url.toString();
+                }} catch (err) {{
+                    console.error("前端 JS 报错: ", err.message);
+                }}
             }}
-        }}
-        
-        
-        function handleClick(element) {{
-            clearHighlights(false);
-            const idx  = parseInt(element.dataset.idx, 10);
-            const data = wordData.find(d => d.idx === idx);
-            if (!data) return;
 
-            element.style.outline = '3px solid #39FF14';
-            data.deps.forEach(dep => {{
-                const relEl = idxToElement.get(dep.position);
-                if (relEl) relEl.style.outline = '3px solid #39FF14';
-            }});
 
-            showDependencies(data);
-        }}
+            function handleClick(element) {{
+                clearHighlights(false);
+                const idx  = parseInt(element.dataset.idx, 10);
+                const data = wordData.find(d => d.idx === idx);
+                if (!data) return;
 
-        function showDependencies(data) {{
-            const container = document.getElementById('depRelationContainer');
-            container.innerHTML = '';
-            const div = document.createElement('div');
-            div.className = 'dep-relation';
-            let h = '<div class="relation-title">Dependency relations:</div>';
-            if (data.deps.length === 0) {{
-                h += '<div class="relation-item">No dependency relations for this word.</div>';
-            }} else {{
+                element.style.outline = '3px solid #39FF14';
                 data.deps.forEach(dep => {{
-                    const note  = deprelLabels[dep.deprel] || dep.deprel;
-                    const label = (note !== dep.deprel)
-                        ? note + ' (' + dep.deprel + ')' : dep.deprel;
-                    h += `<div class="relation-item">
-                        <strong>${{data.word}}</strong>
-                        ──${{label}}──&gt;
-                        <strong>${{dep.lemma}}</strong>
-                        </div>`;
+                    const relEl = idxToElement.get(dep.position);
+                    if (relEl) relEl.style.outline = '3px solid #39FF14';
                 }});
+
+                showDependencies(data);
             }}
-            div.innerHTML = h;
-            container.appendChild(div);
-        }}
 
-        function clearHighlights(clearPanel) {{
-            document.querySelectorAll('.word').forEach(w => w.style.outline = '');
-            if (clearPanel !== false) {{
-                document.getElementById('depRelationContainer').innerHTML = '';
+            function showDependencies(data) {{
+                const container = document.getElementById('depRelationContainer');
+                container.innerHTML = '';
+                const div = document.createElement('div');
+                div.className = 'dep-relation';
+                let h = '<div class="relation-title">Dependency relations:</div>';
+                if (data.deps.length === 0) {{
+                    h += '<div class="relation-item">No dependency relations for this word.</div>';
+                }} else {{
+                    data.deps.forEach(dep => {{
+                        const note  = deprelLabels[dep.deprel] || dep.deprel;
+                        const label = (note !== dep.deprel)
+                            ? note + ' (' + dep.deprel + ')' : dep.deprel;
+                        h += `<div class="relation-item">
+                            <strong>${{data.word}}</strong>
+                            ──${{label}}──&gt;
+                            <strong>${{dep.lemma}}</strong>
+                            </div>`;
+                    }});
+                }}
+                div.innerHTML = h;
+                container.appendChild(div);
             }}
-        }}
 
-        document.addEventListener('click', function(e) {{
-            if (!e.target.classList.contains('word')) clearHighlights();
-        }});
+            function clearHighlights(clearPanel) {{
+                document.querySelectorAll('.word').forEach(w => w.style.outline = '');
+                if (clearPanel !== false) {{
+                    document.getElementById('depRelationContainer').innerHTML = '';
+                }}
+            }}
 
-        if (selectedIdx >= 0) {{
-            const el = document.querySelector(`.word[data-idx="${{selectedIdx}}"]`);
-            if (el) handleClick(el);
-        }}
-    </script>
-</body>
-</html>"""
+            document.addEventListener('click', function(e) {{
+                if (!e.target.classList.contains('word')) clearHighlights();
+            }});
+
+            if (selectedIdx >= 0) {{
+                const el = document.querySelector(`.word[data-idx="${{selectedIdx}}"]`);
+                if (el) handleClick(el);
+            }}
+        </script>
+    </body>
+    </html>"""
     return full_html
-
 
 # ===================================================================
 # [改动4] Session 初始化 + 侧边栏
