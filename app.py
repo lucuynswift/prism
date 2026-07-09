@@ -1359,8 +1359,8 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
     </head>
     <body>
         <div class="hint-bar">
-            鼠标单击: 瞬间查看依存关系（纯前端丝滑不闪烁） &nbsp;|&nbsp;
-            鼠标双击: 强力加入单词本（重载同步）
+            🖱️ 鼠标单击: 瞬间查看依存关系（丝滑不闪烁，后台精准计数） &nbsp;|&nbsp;
+            ✨ 鼠标双击: 加入生词本（通过安全通道同步）
         </div>
         <div class="sentence-container" id="sentenceContainer">
             {sentence_html}
@@ -1368,7 +1368,6 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
         <div id="depRelationContainer"></div>
 
         <script>
-            // 1. 🔥【核心修复】：使用 json.dumps 确保 Python 的 None 被安全转为 JS 的 null，防止脚本暴毙
             const wordData     = {json.dumps(word_data_json)};
             const deprelLabels = {json.dumps(DEPREL_LABELS)};
             const selectedIdx  = {json.dumps(selected_word_idx)};
@@ -1379,23 +1378,23 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 if (el) idxToElement.set(d.idx, el);
             }});
 
-            // 全局定时器，用来隔离单击和双击
+            // 📥 【核心新增】：前端点击事件历史记录器与计数器
+            let clickHistory = []; 
             let clickTimer = null;
 
             window.addEventListener('load', function() {{
                 const words = document.querySelectorAll('.word');
-                console.log('找到单词标签数量:', words.length);
 
                 words.forEach(el => {{
-                    // 单击事件：纯前端渲染，绝不触发刷新
+                    // 1. 左键单击：前端秒开，同时在前端队列中累加计数
                     el.addEventListener('click', function(e) {{
                         if (e.button !== 0) return; 
                         e.stopPropagation();
 
                         if (clickTimer) clearTimeout(clickTimer);
 
-                        // 延迟 220ms 执行，确保用户不是在双击
                         clickTimer = setTimeout(() => {{
+                            const idx = parseInt(el.dataset.idx, 10);
                             try {{
                                 if (typeof handleClick === 'function') {{
                                     handleClick(el); 
@@ -1403,46 +1402,66 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                             }} catch (err) {{
                                 console.error('handleClick 内部报错:', err);
                             }}
+
+                            // 🔥 秘密记录：把点击的单词索引存进前端历史数组
+                            clickHistory.push(idx);
+                            console.log("当前前端累计点击队列:", clickHistory);
+
+                            // 【联动后端】：将当前这句累计的所有点击，实时同步给 Streamlit 父页面，但【绝不刷新页面】
+                            syncClicksToParent();
+
                         }}, 220); 
                     }});
 
-                    // 双击事件：加入生词本（调用后端同步）
+                    // 2. 双击：加入生词本（允许强制同步）
                     el.addEventListener('dblclick', function(e) {{
                         e.stopPropagation();
-
                         if (clickTimer) {{
                             clearTimeout(clickTimer);
                             clickTimer = null;
                         }}
-
                         notifyParent('wb', parseInt(this.dataset.idx, 10));
                     }});
                 }});
             }});
 
-
-            // 🔥【核心修复】：增加了防白屏、防坍塌的安全机制
-            function notifyParent(action, idx) {{
+            // 📡 【核心新增】：纯静默同步函数。利用 window.parent 动态无刷更新父级 URL 的 query 参数
+            // 这样当你点“下一句”按钮刷新网页时，主网页的 URL 里已经带上了你点过的所有完整数据！
+            function syncClicksToParent() {{
                 try {{
-                    const payload = JSON.stringify({{a: action, i: idx}});
-                    const parentUrl = document.referrer;
+                    // 打包所有的点击历史
+                    const payload = JSON.stringify({{a: 'log_batch', clicks: clickHistory}});
 
-                    // 极其关键：如果 referrer 被浏览器剥离，或者错拿到了 iframe 本身的沙箱 URL
-                    // 必须立刻拦截，否则整个 Streamlit 应用会被洗成一片空白或陷入死循环
-                    if (!parentUrl || parentUrl.includes('/component/')) {{
-                        console.warn("⚠️ [安全拦截] 未能获取到合法的宿主宿主页面 URL，已终止重定向，防止页面坍塌。");
-                        alert("由于自建服务器的跨域安全限制，双击暂无法同步。请检查 Nginx 的 Referrer 策略。");
-                        return;
-                    }}
-
+                    // 绝妙之笔：直接修改父级浏览器的当前 URL 参数，而【完全不引发页面刷新】
+                    const parentUrl = window.parent.location.href;
                     const url = new URL(parentUrl);
                     url.searchParams.set('_ic', payload);
-                    window.top.location.href = url.toString();
+
+                    // 使用 HTML5 pushState 静默替换父页面的 URL 地址栏
+                    window.parent.history.replaceState(null, null, url.toString());
                 }} catch (err) {{
-                    console.error("前端 JS 报错: ", err.message);
+                    console.error("静默同步点击数据失败，可能是跨域受限:", err.message);
                 }}
             }}
 
+            // 突破自建服务器 Nginx Referrer 限制的全新跨域中转函数
+            function notifyParent(action, idx) {{
+                try {{
+                    // 将行为和对应的历史点击队列一起打包
+                    const payload = {{
+                        from_iframe: true,
+                        a: action,
+                        i: idx,
+                        clicks: clickHistory
+                    }};
+                    // 🌟 核心改进：放弃危险的 location.href 修改，改用 W3C 标准的跨域安全通道
+                    // 向宿主父窗口发送密信，'*' 代表允许广播（或替换为您网站的具体域名）
+                    window.parent.postMessage(JSON.stringify(payload), '*');
+                    console.log("已通过安全通道发出数据: ", action, idx);
+                }} catch (err) {{
+                    console.error("前端通知主页面失败: ", err.message);
+                }}
+            }}
 
             function handleClick(element) {{
                 clearHighlights(false);
@@ -1494,7 +1513,6 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 if (!e.target.classList.contains('word')) clearHighlights();
             }});
 
-            // 🔥【核心修复】：健全判定条件，防止 null >= 0 产生逻辑误判
             if (selectedIdx !== null && selectedIdx >= 0) {{
                 const el = document.querySelector(`.word[data-idx="${{selectedIdx}}"]`);
                 if (el) handleClick(el);
@@ -1923,6 +1941,65 @@ with tab1:
     sel_key = f"_selected_word_{book_name}_{display_sentence}"
     selected_word_idx = st.session_state.get(sel_key, -1)
 
+    # ─── 处理前端 iframe 传回的批量点击与生词本动作 ───
+    if st.query_params.get("_ic"):
+        try:
+            import json
+
+            raw_ic_data = st.query_params["_ic"]
+
+            # 1. 尝试解析前端传来的复杂 JSON 数据
+            data_payload = json.loads(raw_ic_data)
+
+            # 2. 【核心修复】：提取前端累积的批量点击历史
+            iframe_clicks = data_payload.get("clicks", [])  # 这是一个包含了点击单词索引的 list，例如 [2, 5, 2]
+
+            # 3. 将这些批量点击安全、原封不动地同步注入或补录到后天的 click_cache_key 缓存中
+            if isinstance(iframe_clicks, list) and len(iframe_clicks) > 0:
+                # 拿到你对应的点击日志缓存 key
+                # 确保在这个 if 前，你的代码已经定义好了 sentence_tokens 和 click_cache_key
+                current_click_log = st.session_state.get(click_cache_key, [])
+
+                # 为前端队列里的每一次点击，都模拟生成一条真实的后端行为日志
+                for idx in iframe_clicks:
+                    if 0 <= idx < len(sentence_tokens):
+                        token = sentence_tokens[idx]
+
+                        # 拼装跟你的系统格式完全一致的点击事件字典
+                        # 这里的 _build_click_event 如果是你本来的函数，可以直接调用它
+                        ev = _build_click_event(token, dwell_ms=0) if '_build_click_event' in globals() else {
+                            "word": token.get("display", ""),
+                            "lemma": token.get("lemma", ""),
+                            "timestamp": time.time()
+                        }
+                        current_click_log.append(ev)
+
+                st.session_state[click_cache_key] = current_click_log
+                print(
+                    f"【后台成功录入】已将前端批量点击补录进缓存，本次新增 {len(iframe_clicks)} 次，当前累计：{len(current_click_log)}")
+
+            # 4. 照常处理原本的点击/右键/双击行为（如：如果是 wb 动作，则加入生词本）
+            action = data_payload.get("a")
+            if action == "wb":
+                # 同样分发给原有的核心处理函数，让它继续发挥弹出 toast 和写入生词本的功能
+                flash_msg = _process_iframe_word_action(
+                    raw_ic_data,  # 或者是按它的预期传对应的格式
+                    sentence_tokens,
+                    click_cache_key,
+                    book_name,
+                    sentence_id,
+                    display_sentence,
+                )
+                if flash_msg:
+                    st.session_state["global_toast"] = flash_msg
+
+        except Exception as e:
+            print(f"解析批量点击数据包出错: {e}")
+
+        # 处理完后，清除 URL 参数并安全刷新页面（避免死循环）
+        del st.query_params["_ic"]
+        st.rerun()
+
     # if st.query_params.get("_ic"):
     #     flash_msg = _process_iframe_word_action(
     #         st.query_params["_ic"],
@@ -1932,79 +2009,49 @@ with tab1:
     #         sentence_id,
     #         display_sentence,
     #     )
-    #     del st.query_params["_ic"]
-    #     if flash_msg:
-    #         st.session_state[f"_flash_{book_name}_{display_sentence}"] = flash_msg
-    #     st.rerun()
-    ## --- 修改后的处理逻辑 ---
-    # if st.query_params.get("_ic"):
-    #     # 获取原始动作数据
-    #     raw_ic = st.query_params["_ic"]
-    #
-    #     # 执行处理逻辑
-    #     flash_msg = _process_iframe_word_action(
-    #         raw_ic,
-    #         sentence_tokens,
-    #         click_cache_key,
-    #         book_name,
-    #         sentence_id,
-    #         display_sentence,
-    #     )
-    #
-    #     # 【方案3修改点】：不再使用动态 key，统一存入 'global_toast'
+    #     # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
     #     if flash_msg:
     #         st.session_state["global_toast"] = flash_msg
     #
-    #     # 清理参数并重绘
     #     del st.query_params["_ic"]
     #     st.rerun()
 
-    if st.query_params.get("_ic"):
-        flash_msg = _process_iframe_word_action(
-            st.query_params["_ic"],
-            sentence_tokens,
-            click_cache_key,
-            book_name,
-            sentence_id,
-            display_sentence,
-        )
-        # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
-        if flash_msg:
-            st.session_state["global_toast"] = flash_msg
-
-        del st.query_params["_ic"]
-        st.rerun()
-    #============================================================
-    #【直接接收器】：放在 app.py 顶部（import 之后，页面渲染之前）
-    #============================================================
-    # query_params = st.query_params
-    # if "_ic" in query_params:
-    #     query_value = query_params["_ic"]
-    #
-    #     # 调用处理逻辑
-    #     result = _process_iframe_word_action(
-    #         query_value,
-    #         st.session_state.current_sentence_tokens,
-    #         f"_click_log_{st.session_state.book_name}",
-    #         st.session_state.book_name,
-    #         st.session_state.sentence_id,
-    #         st.session_state.display_sentence
-    #     )
-    #
-    #     # 弹出提示
-    #     if result:
-    #         st.toast(result)
-    #
-    #     # 处理完必须清空，否则刷新页面会死循环重复触发！
-    #     st.query_params.clear()
-#====================================================================================================================
     interactive_html = generate_interactive_sentence_html(
         sentence_tokens, dep_map_by_position, dep_roles_by_position,
         sentence_id, core_lemmas, modifier_lemmas,
         book_name, display_sentence, st.session_state.get('simplify_mode'),
         selected_word_idx=selected_word_idx)
     components.html(interactive_html, height=480, scrolling=True)
+    # 2. 🌟 核心新增：Streamlit 端的跨域消息解包器 (无感静默接收)
+    # 这段嵌入式 JS 会在父页面运行，抓取 iframe 投递出来的生词本添加(wb)和点击队列(clicks)
+    receiver_html = """
+    <script>
+    window.addEventListener("message", function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            if (data && data.from_iframe) {
+                // 解析出点击历史以及具体的行为(如 wb)
+                const payload = JSON.stringify({
+                    a: data.a,
+                    i: data.i,
+                    clicks: data.clicks
+                });
 
+                // 安全注入到当前主页面的 URL 参数中
+                const url = new URL(window.location.href);
+                url.searchParams.set('_ic', payload);
+
+                // 静默更新地址栏，当用户点击“下一句”或者触发任何 Streamlit 组件时，后端便能一次性捕获
+                window.history.replaceState(null, null, url.toString());
+            }
+        } catch (e) {
+            // 忽略非 JSON 的系统杂乱消息
+        }
+    }, false);
+    </script>
+    """
+    # 将这个监听器静默挂载到页面上
+    components.html(receiver_html, height=0, width=0)
     flash_key = f"_flash_{book_name}_{display_sentence}"
     if flash_key in st.session_state:
         msg = st.session_state.pop(flash_key)
