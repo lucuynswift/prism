@@ -1942,48 +1942,53 @@ with tab1:
     selected_word_idx = st.session_state.get(sel_key, -1)
 
     # ─── 处理前端 iframe 传回的批量点击与生词本动作 ───
+    # ─── 【全新修正版】处理前端 iframe 传回的批量点击与生词本动作 ───
     if st.query_params.get("_ic"):
+        need_rerun = False  # 💡 关键开关：初始化标记，默认绝不轻易刷新页面
+
         try:
             import json
 
             raw_ic_data = st.query_params["_ic"]
 
-            # 1. 尝试解析前端传来的复杂 JSON 数据
+            # 1. 解析前端传来的复杂 JSON 数据
             data_payload = json.loads(raw_ic_data)
+            action = data_payload.get("a")
+            idx = data_payload.get("i")
+            iframe_clicks = data_payload.get("clicks", [])  # 前端累积的点击历史数组
 
-            # 2. 【核心修复】：提取前端累积的批量点击历史
-            iframe_clicks = data_payload.get("clicks", [])  # 这是一个包含了点击单词索引的 list，例如 [2, 5, 2]
-
-            # 3. 将这些批量点击安全、原封不动地同步注入或补录到后天的 click_cache_key 缓存中
+            # 2. 🔥【修复左键计数】：将前端传过来的历史点击全额安全补录进缓存
             if isinstance(iframe_clicks, list) and len(iframe_clicks) > 0:
-                # 拿到你对应的点击日志缓存 key
-                # 确保在这个 if 前，你的代码已经定义好了 sentence_tokens 和 click_cache_key
                 current_click_log = st.session_state.get(click_cache_key, [])
+                last_key = f"_last_click_time_{book_name}_{sentence_id}"
 
-                # 为前端队列里的每一次点击，都模拟生成一条真实的后端行为日志
-                for idx in iframe_clicks:
-                    if 0 <= idx < len(sentence_tokens):
-                        token = sentence_tokens[idx]
+                for c_idx in iframe_clicks:
+                    if 0 <= c_idx < len(sentence_tokens):
+                        token = sentence_tokens[c_idx]
+                        if token.get("lemma"):  # 确保有词根
+                            now = time.time()
+                            last_click_time = st.session_state.get(last_key)
+                            dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
+                            st.session_state[last_key] = now
 
-                        # 拼装跟你的系统格式完全一致的点击事件字典
-                        # 这里的 _build_click_event 如果是你本来的函数，可以直接调用它
-                        ev = _build_click_event(token, dwell_ms=0) if '_build_click_event' in globals() else {
-                            "word": token.get("display", ""),
-                            "lemma": token.get("lemma", ""),
-                            "timestamp": time.time()
-                        }
-                        current_click_log.append(ev)
+                            ev = _build_click_event(token, dwell_ms=dwell_ms)
+                            current_click_log.append(ev)
 
                 st.session_state[click_cache_key] = current_click_log
-                print(
-                    f"【后台成功录入】已将前端批量点击补录进缓存，本次新增 {len(iframe_clicks)} 次，当前累计：{len(current_click_log)}")
+                print(f"🔥 [后台统计成功] 成功合并录入点击 {len(iframe_clicks)} 次。")
 
-            # 4. 照常处理原本的点击/右键/双击行为（如：如果是 wb 动作，则加入生词本）
-            action = data_payload.get("a")
-            if action == "wb":
-                # 同样分发给原有的核心处理函数，让它继续发挥弹出 toast 和写入生词本的功能
+            # 3. 🔥【修复左键高亮消失】：记录最后一次点击的索引，供页面维持高亮
+            if idx is not None and isinstance(idx, int) and (0 <= idx < len(sentence_tokens)):
+                sel_key = f"_selected_word_{book_name}_{display_sentence}"
+                st.session_state[sel_key] = idx
+
+            # 4. 🔥【修复双击生词本】：将格式重组伪装，完美骗过老函数的严格校验
+            if action == "wb" and idx is not None:
+                # 重新拼装一个只包含普通单次动作的标准老版 JSON 字符串
+                compatible_payload = json.dumps({"a": "wb", "i": idx})
+
                 flash_msg = _process_iframe_word_action(
-                    raw_ic_data,  # 或者是按它的预期传对应的格式
+                    compatible_payload,  # 👈 传入清洗后的纯净数据，不再传带有 clicks 的数据
                     sentence_tokens,
                     click_cache_key,
                     book_name,
@@ -1993,12 +1998,20 @@ with tab1:
                 if flash_msg:
                     st.session_state["global_toast"] = flash_msg
 
+                # 双击加入了生词本，需要刷新页面回显或弹出 Toast，此时才允许 rerun
+                need_rerun = True
+
         except Exception as e:
             print(f"解析批量点击数据包出错: {e}")
 
-        # 处理完后，清除 URL 参数并安全刷新页面（避免死循环）
+        # 5. 🔥【生死宣判】：彻底解决全白和只加 1 次的死穴
+        # 清除当前的 query_params 参数，防止死循环
         del st.query_params["_ic"]
-        st.rerun()
+
+        # 核心：只有在发生了双击(wb)等确实需要后端重绘的操作时才允许 rerun！
+        # 如果只是左键点击查依存关系，need_rerun 为 False，后台静默放行，前端绿框和依存框瞬间丝滑显示！
+        if need_rerun:
+            st.rerun()
 
     # if st.query_params.get("_ic"):
     #     flash_msg = _process_iframe_word_action(
