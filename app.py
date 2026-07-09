@@ -1359,8 +1359,8 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
     </head>
     <body>
         <div class="hint-bar">
-            🖱️ 鼠标单击: 瞬间查看依存关系（丝滑不闪烁） &nbsp;|&nbsp;
-            ✨ 鼠标双击: 强力加入单词本
+            鼠标单击: 瞬间查看依存关系（纯前端丝滑不闪烁） &nbsp;|&nbsp;
+            鼠标双击: 强力加入单词本（重载同步）
         </div>
         <div class="sentence-container" id="sentenceContainer">
             {sentence_html}
@@ -1368,9 +1368,10 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
         <div id="depRelationContainer"></div>
 
         <script>
+            // 1. 🔥【核心修复】：使用 json.dumps 确保 Python 的 None 被安全转为 JS 的 null，防止脚本暴毙
             const wordData     = {json.dumps(word_data_json)};
             const deprelLabels = {json.dumps(DEPREL_LABELS)};
-            const selectedIdx  = {selected_word_idx};
+            const selectedIdx  = {json.dumps(selected_word_idx)};
 
             const idxToElement = new Map();
             wordData.forEach(d => {{
@@ -1378,7 +1379,7 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 if (el) idxToElement.set(d.idx, el);
             }});
 
-            // 全局定时器，用来完美隔离单击和双击
+            // 全局定时器，用来隔离单击和双击
             let clickTimer = null;
 
             window.addEventListener('load', function() {{
@@ -1386,56 +1387,56 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 console.log('找到单词标签数量:', words.length);
 
                 words.forEach(el => {{
-                    // 1. 🔥【重大修改】左键单击：纯前端本地高亮，绝不刷新网页！
+                    // 单击事件：纯前端渲染，绝不触发刷新
                     el.addEventListener('click', function(e) {{
                         if (e.button !== 0) return; 
                         e.stopPropagation();
 
                         if (clickTimer) clearTimeout(clickTimer);
 
-                        // 延迟 220ms 执行，给双击留出判断时间
+                        // 延迟 220ms 执行，确保用户不是在双击
                         clickTimer = setTimeout(() => {{
                             try {{
                                 if (typeof handleClick === 'function') {{
-                                    handleClick(el); // 瞬间在前端激活动态特效与依存面板
+                                    handleClick(el); 
                                 }}
                             }} catch (err) {{
-                                console.error('handleClick 内部报错了:', err);
+                                console.error('handleClick 内部报错:', err);
                             }}
-
-                            // 💡 注意：此处不再调用会摧毁页面的 notifyParent('log')。
-                            // 如果你后面需要收集点击日志，可以在这里使用前端 fetch() 异步静默发送给你的 FastAPI 后端，
-                            // 这样既能存下日志，又绝对不会刷新和破坏当前的 Streamlit 页面。
-
                         }}, 220); 
                     }});
 
-                    // 2. 双击：加入生词本（允许同步数据并重载页面）
+                    // 双击事件：加入生词本（调用后端同步）
                     el.addEventListener('dblclick', function(e) {{
                         e.stopPropagation();
 
-                        // 一旦确认为双击，立刻扼杀掉刚才单击留在队列里的延时任务
                         if (clickTimer) {{
                             clearTimeout(clickTimer);
                             clickTimer = null;
                         }}
 
-                        // 执行通知流，加入生词本
                         notifyParent('wb', parseInt(this.dataset.idx, 10));
                     }});
                 }});
             }});
 
 
-            // 突破自建服务器沙箱限制的跳转函数
+            // 🔥【核心修复】：增加了防白屏、防坍塌的安全机制
             function notifyParent(action, idx) {{
                 try {{
                     const payload = JSON.stringify({{a: action, i: idx}});
-                    const parentUrl = document.referrer || window.location.href;
+                    const parentUrl = document.referrer;
+
+                    // 极其关键：如果 referrer 被浏览器剥离，或者错拿到了 iframe 本身的沙箱 URL
+                    // 必须立刻拦截，否则整个 Streamlit 应用会被洗成一片空白或陷入死循环
+                    if (!parentUrl || parentUrl.includes('/component/')) {{
+                        console.warn("⚠️ [安全拦截] 未能获取到合法的宿主宿主页面 URL，已终止重定向，防止页面坍塌。");
+                        alert("由于自建服务器的跨域安全限制，双击暂无法同步。请检查 Nginx 的 Referrer 策略。");
+                        return;
+                    }}
+
                     const url = new URL(parentUrl);
                     url.searchParams.set('_ic', payload);
-
-                    // 仅在双击生词本时，命令最外层主浏览器跳转重载
                     window.top.location.href = url.toString();
                 }} catch (err) {{
                     console.error("前端 JS 报错: ", err.message);
@@ -1493,7 +1494,8 @@ def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_
                 if (!e.target.classList.contains('word')) clearHighlights();
             }});
 
-            if (selectedIdx >= 0) {{
+            // 🔥【核心修复】：健全判定条件，防止 null >= 0 产生逻辑误判
+            if (selectedIdx !== null && selectedIdx >= 0) {{
                 const el = document.querySelector(`.word[data-idx="${{selectedIdx}}"]`);
                 if (el) handleClick(el);
             }}
