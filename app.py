@@ -1389,6 +1389,7 @@ def get_cached_subscription(token):
 
 # 直接获取，不用再塞进 st.session_state 造成状态污染
 token = st.session_state.get("auth_token")
+username = st.session_state.get("username")
 sub = get_cached_subscription(token) if token else {"subscribed": False}
 # ── [改动5] 免费体验策略 ──────────────────────────────────────────
 # 注册后 14 天：全功能不限量
