@@ -1124,39 +1124,30 @@ def _build_click_event(token: dict, dwell_ms: int = 0) -> dict:
         "dwell_ms":  dwell_ms,
     }
 
-def _process_iframe_word_action(
-        query_value: str,
+def _process_word_action(
+        action: str,
+        idx,
         sentence_tokens: list,
         click_cache_key: str,
         book_name: str,
         sentence_id: int,
         display_sentence: int,
 ) -> str | None:
-    """Process iframe left-click (log) / right-click (wordbook) actions."""
-
-    # 1. 捕捉 JSON 解析错误
-    try:
-        payload = json.loads(query_value)
-    except Exception as e:
-        return f"⚠️ JSON decode error: {e}"
-
-    action = payload.get("a")
-    idx = payload.get("i")
-
-    # 2. 捕捉索引类型或越界错误
+    """处理 CCv2 面板回传的事件：
+    action == 'word_click'  → 左键：记录点击日志
+    action == 'add_wordbook' → 右键：加入单词本
+    """
     if not isinstance(idx, int):
         return f"⚠️ Error: Index is not an integer ({idx})"
     if idx < 0 or idx >= len(sentence_tokens):
         return f"⚠️ Error: Index out of bounds ({idx})"
 
     token = sentence_tokens[idx]
-
-    # 3. 捕捉因为没有 Lemma 导致的被忽略（以前是静默 return None）
     if not token.get("lemma"):
         return f"ℹ️ '{token.get('display', '?')}' ignored (No lemma available)"
 
     # --- 左键逻辑：记录点击日志 ---
-    if action == "log":
+    if action == "word_click":
         sel_key = f"_selected_word_{book_name}_{display_sentence}"
         st.session_state[sel_key] = idx
 
@@ -1167,30 +1158,24 @@ def _process_iframe_word_action(
         st.session_state[last_key] = now
 
         ev = _build_click_event(token, dwell_ms=dwell_ms)
-        current_click_log = st.session_state.get(click_cache_key, [])
-        current_click_log.append(ev)
-        st.session_state[click_cache_key] = current_click_log
+        st.session_state.setdefault(click_cache_key, []).append(ev)
 
         return f"✅ Recorded: {token['display']}"
 
     # --- 右键逻辑：加入单词本 ---
-    if action == "wb":
-        lemma = token.get("lemma")
-        lemma_lower = lemma.lower().strip()
+    if action == "add_wordbook":
+        lemma_lower = token["lemma"].lower().strip()
         entry = {
             "book": book_name,
             "lemma": lemma_lower,
-            "word": token["display"].strip()
+            "word": token["display"].strip(),
         }
 
-        # 检查是否已存在
         if any(e.get('lemma') == lemma_lower for e in st.session_state.user_wordbook):
             return f"ℹ️ '{token['display']}' is already in your wordbook."
 
-        # 加入本地缓存
         st.session_state.user_wordbook.append(entry)
 
-        # 捕捉网络同步错误
         try:
             save_success = save_progress()
             if save_success:
@@ -1202,374 +1187,203 @@ def _process_iframe_word_action(
 
     return f"⚠️ Unknown action received: {action}"
 
-    # if action == "wb":
-    #     lemma = token.get("lemma")
-    #     if not lemma: return "⚠️ Error: Invalid word"
-    #
-    #     entry = {"book": book_name, "lemma": lemma, "word": token["display"]}
-    #
-    #     # 检查是否已存在
-    #     if any(e['lemma'] == lemma for e in st.session_state.user_wordbook):
-    #         return f"⚠️ '{token['display']}' is already in your wordbook."
-    #
-    #     st.session_state.user_wordbook.append(entry)
-    #     # 使用 try-except 保护保存过程
-    #     try:
-    #         save_progress()
-    #     except Exception as e:
-    #         return f"❌ Save failed: {e}"
-    #
-    #     return f"✅ Added '{token['display']}' to wordbook!"
-
-    # if action == "wb":
-    #     entry = {"book": book_name, "lemma": token["lemma"], "word": token["display"]}
-    #     if entry not in st.session_state.user_wordbook:
-    #         st.session_state.user_wordbook.append(entry)
-    #         save_progress()
-    #         return f"✅ Added '{token['display']}' to the wordbook."
-    #
-    #     return f"📖 Added to wordbook: {token['display']}"
-    return None
-
 
 # ===================================================================
-# [Fix-A] 修复后的交互式句子 HTML 生成函数（接口不变，内部用 token.deps_info）
+# [CCv2 重写] 依存关系交互面板
+# 用 st.components.v2.component 取代旧的 components.html + URL 查询参数 hack。
+# CCv2 组件不经过 iframe，因此不存在“无法读取 window.parent.location.href”
+# 这一跨域限制导致的点击无响应问题；左键高亮/依存展示在前端 JS 中同步完成，
+# 无需等待 Python 往返即可立刻显示。
 # ===================================================================
-def generate_interactive_sentence_html(words, dep_map_by_position, dep_roles_by_position,
-                                       sentence_id, core_lemmas, modifier_lemmas,
-                                       book_name, display_sentence, simplify_mode=None,
-                                       selected_word_idx: int = -1):
 
-    def should_show_word(word_idx):
-        if simplify_mode is None:
-            return True
-        as_dep_rels = set()
-        if word_idx in dep_roles_by_position:
-            as_dep_rels = dep_roles_by_position[word_idx]['as_dependent']
-        if simplify_mode == 'svo_only':
-            core_rels = {'nsubj', 'nsubj:pass', 'obj', 'iobj', 'root', 'ROOT',
-                         'csubj', 'csubj:pass', 'ccomp', 'xcomp'}
-            return any(r in core_rels for r in as_dep_rels) or len(as_dep_rels) == 0
-        elif simplify_mode == 'no_amod':
-            return 'amod' not in as_dep_rels
-        elif simplify_mode == 'no_advmod':
-            return 'advmod' not in as_dep_rels and 'obl' not in as_dep_rels
-        elif simplify_mode == 'no_complement':
-            return not any(r in {'ccomp', 'xcomp', 'advcl'} for r in as_dep_rels)
-        return True
+_DEP_PANEL_HTML = """
+<div class="dep-panel-sentence" id="dp-sentence"></div>
+<div class="dep-panel-relations" id="dp-relations"></div>
+"""
 
-    html_parts     = []
-    word_data_json = []
+_DEP_PANEL_CSS = """
+.dep-panel-sentence {
+    line-height: 2.3;
+    padding: 6px 2px 10px 2px;
+}
+.dep-word {
+    cursor: pointer;
+    padding: 1px 2px;
+    border-radius: 4px;
+}
+.dep-word:hover {
+    background: rgba(120, 120, 120, 0.15);
+}
+.dep-word.dep-active {
+    outline: 2px solid #39FF14;
+    background: rgba(57, 255, 20, 0.15);
+}
+.dep-word.dep-related {
+    outline: 2px dashed #1E90FF;
+    background: rgba(30, 144, 255, 0.12);
+}
+.dep-punct { color: #888; }
+.dep-panel-relations {
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(120, 120, 120, 0.25);
+    font-size: 0.85rem;
+}
+.dep-rel-title { font-weight: 600; margin-bottom: 4px; opacity: 0.8; }
+.dep-rel-item { padding: 2px 0; }
+.dep-rel-empty { opacity: 0.6; font-style: italic; }
+"""
 
-    for idx, word_data in enumerate(words):
-        word  = word_data['display']
-        lemma = word_data.get('lemma')
-        freq  = word_data.get('freq', 0)
+_DEP_PANEL_JS = """
+export default function(component) {
+    const { data, parentElement, setTriggerValue } = component;
+    const tokens = (data && data.tokens) || [];
+    const deprelLabels = (data && data.deprelLabels) || {};
+    const selectedIdx = (data && typeof data.selectedIdx === 'number') ? data.selectedIdx : -1;
 
-        if lemma and not should_show_word(idx):
+    const sentenceEl  = parentElement.querySelector('#dp-sentence');
+    const relationsEl = parentElement.querySelector('#dp-relations');
+
+    sentenceEl.innerHTML = '';
+    const idxToEl = new Map();
+
+    tokens.forEach((tok) => {
+        const span = document.createElement('span');
+        span.textContent = tok.display + ' ';
+        if (tok.lemma) {
+            span.className = 'dep-word';
+            span.dataset.idx = String(tok.idx);
+            if (tok.color) span.style.color = tok.color;
+            if (tok.fontSize) span.style.fontSize = tok.fontSize;
+            idxToEl.set(tok.idx, span);
+        } else {
+            span.className = 'dep-punct';
+        }
+        sentenceEl.appendChild(span);
+    });
+
+    function clearHighlights() {
+        idxToEl.forEach((el) => el.classList.remove('dep-active', 'dep-related'));
+    }
+
+    function renderRelations(tok) {
+        relationsEl.innerHTML = '';
+        const title = document.createElement('div');
+        title.className = 'dep-rel-title';
+        title.textContent = 'Dependency relations for "' + tok.display + '":';
+        relationsEl.appendChild(title);
+
+        if (!tok.deps || tok.deps.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'dep-rel-empty';
+            empty.textContent = 'No dependency relations found for this word.';
+            relationsEl.appendChild(empty);
+            return;
+        }
+        tok.deps.forEach((dep) => {
+            const label = deprelLabels[dep.deprel] || dep.deprel;
+            const line = document.createElement('div');
+            line.className = 'dep-rel-item';
+            line.textContent = tok.display + '  \\u2500\\u2500' + label + '\\u2500\\u2500\\u25B6  ' + dep.head_lemma;
+            relationsEl.appendChild(line);
+        });
+    }
+
+    function highlight(idx) {
+        const tok = tokens.find((t) => t.idx === idx);
+        if (!tok) return null;
+        clearHighlights();
+        const el = idxToEl.get(idx);
+        if (el) el.classList.add('dep-active');
+        (tok.deps || []).forEach((dep) => {
+            const relEl = idxToEl.get(dep.position);
+            if (relEl) relEl.classList.add('dep-related');
+        });
+        renderRelations(tok);
+        return tok;
+    }
+
+    idxToEl.forEach((el, idx) => {
+        // 左键：本地立即高亮 + 展示依存关系，同时上报后端记录日志
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            highlight(idx);
+            setTriggerValue('word_click', { idx: idx, ts: Date.now() });
+        });
+        // 右键：阻止浏览器默认右键菜单，改为加入单词本
+        el.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            setTriggerValue('add_wordbook', { idx: idx, ts: Date.now() });
+        });
+    });
+
+    if (selectedIdx >= 0 && idxToEl.has(selectedIdx)) {
+        highlight(selectedIdx);  // 仅恢复视觉状态，不触发 setTriggerValue
+    } else {
+        relationsEl.innerHTML = '<div class="dep-rel-empty">Left-click a word to highlight its dependency relations. Right-click to add it to your wordbook.</div>';
+    }
+}
+"""
+
+_dep_panel_component = st.components.v2.component(
+    "prism_dep_panel",
+    html=_DEP_PANEL_HTML,
+    css=_DEP_PANEL_CSS,
+    js=_DEP_PANEL_JS,
+)
+
+
+def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
+                             sentence_id, display_sentence, click_cache_key):
+    """挂载 CCv2 依存关系面板，并处理其回传的左键/右键事件。
+    返回一条 flash 提示信息（没有事件则返回 None）。
+    """
+    token_payload = []
+    for i, tok in enumerate(sentence_tokens):
+        if not tok.get("lemma"):
+            token_payload.append({"idx": i, "display": tok["display"], "lemma": None})
             continue
+        font_size, _ = get_font_style_by_frequency(tok.get("freq", 1))
+        token_payload.append({
+            "idx": i,
+            "display": tok["display"],
+            "lemma": tok["lemma"],
+            "color": get_color(tok.get("freq", 1)),
+            "fontSize": font_size,
+            "deps": tok.get("deps_info", []),
+        })
 
-        if lemma:
-            color    = get_color(freq)
-            size_str, font = get_font_style_by_frequency(freq)
-            size     = int(size_str.replace('px', ''))
-            styles   = [f"color:{color}", f"font-size:{size}px",
-                        f"font-family:{font}", "cursor:pointer"]
-            if lemma in core_lemmas:     styles.append("font-weight:bold")
-            if lemma in modifier_lemmas: styles.append("font-style:italic")
-            style_str = "; ".join(styles)
+    result = _dep_panel_component(
+        data={
+            "tokens": token_payload,
+            "deprelLabels": DEPREL_LABELS,
+            "selectedIdx": selected_word_idx,
+        },
+        key=f"dep_panel_{book_name}_{sentence_id}",
+        on_word_click_change=lambda: None,
+        on_add_wordbook_change=lambda: None,
+    )
 
-            # 用 token 里预存的 deps_info 构建 JS 数据（保持 iframe 高亮功能）
-            # dep_data = []
-            # if idx in dep_map_by_position:
-            #     for related_idx, deprel, related_lemma in dep_map_by_position[idx]:
-            #         dep_data.append({
-            #             'position': related_idx,
-            #             'lemma':    related_lemma,
-            #             'deprel':   deprel,
-            #         })
+    flash_msg = None
 
-            #  改为直接从 word_data 中读取预存的对齐数据：
-            dep_data = []
-            if 'deps_info' in word_data and word_data['deps_info']:
-                for dep_item in word_data['deps_info']:
-                    dep_data.append({
-                        'position': dep_item.get('position'),    # head 词的 0-based 位置
-                        'lemma':    dep_item.get('head_lemma'),  # head 词的 lemma
-                        'deprel':   dep_item.get('deprel'),
-                    })
-            word_data_json.append({
-                'idx': idx, 'lemma': lemma, 'word': word, 'deps': dep_data
-            })
-            html_parts.append(
-                f'<span class="word" data-idx="{idx}" '
-                f'data-lemma="{html.escape(lemma)}" '
-                f'style="{style_str}">{html.escape(word)}</span> '
-            )
-        # else:
-        #     html_parts.append(
-        #         f'<span style="color:#555555; font-size:15px; '
-        #         f'font-family:Merriweather">{html.escape(word)}</span> '
-        #     )
-        else:
-            # 将字号调整到 24px - 26px 左右，与主体视觉对齐
-            html_parts.append(
-                f'<span style="color:#555555; font-size:15px; '
-                f'font-family:Merriweather, serif">{html.escape(word)}</span> '
-            )
+    click_event = result.word_click
+    if click_event:
+        flash_msg = _process_word_action(
+            "word_click", click_event.get("idx"), sentence_tokens,
+            click_cache_key, book_name, sentence_id, display_sentence,
+        )
 
-    sentence_html = ''.join(html_parts)
+    wb_event = result.add_wordbook
+    if wb_event:
+        wb_msg = _process_word_action(
+            "add_wordbook", wb_event.get("idx"), sentence_tokens,
+            click_cache_key, book_name, sentence_id, display_sentence,
+        )
+        flash_msg = wb_msg or flash_msg
 
-    full_html = f"""<!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <style>
-            body {{
-                margin: 0; padding: 20px;
-                font-family: Arial, sans-serif; background: #F5E6C8;
-            }}
-            .sentence-container {{
-                font-size: 28px; line-height: 2.5; padding: 20px;
-                background: #F5E6C8; border-radius: 10px;
-                cursor: default; user-select: none;
-            }}
-            .word {{
-                transition: background-color 0.2s;
-                padding: 2px 4px; border-radius: 3px;
-            }}
-            .word:hover {{ background-color: #f0f0f0; }}
-            .dep-relation {{
-                margin-top: 15px; padding: 15px; background: #e3f2fd;
-                border-radius: 8px; font-size: 16px;
-                border-left: 4px solid #2196F3; animation: fadeIn 0.3s;
-            }}
-            @keyframes fadeIn {{
-                from {{ opacity: 0; transform: translateY(-10px); }}
-                to   {{ opacity: 1; transform: translateY(0); }}
-            }}
-            .relation-title {{ font-weight: bold; margin-bottom: 8px; color: #1976D2; }}
-            .relation-item  {{ margin: 5px 0; padding: 5px; background: white; border-radius: 4px; }}
-            .hint-bar {{
-                margin-bottom: 10px; padding: 8px 12px; background: #fff8e1;
-                border-radius: 6px; font-size: 13px; color: #795548;
-                border-left: 3px solid #ffb300;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="hint-bar">
-            🖱️ 鼠标单击: 瞬间查看依存关系（丝滑不闪烁，后台精准计数） &nbsp;|&nbsp;
-            ✨ 鼠标双击: 加入生词本（通过安全通道同步）
-        </div>
-        <div class="sentence-container" id="sentenceContainer">
-            {sentence_html}
-        </div>
-        <div id="depRelationContainer"></div>
+    return flash_msg
 
-        <script>
-            const wordData     = {json.dumps(word_data_json)};
-            const deprelLabels = {json.dumps(DEPREL_LABELS)};
-            const selectedIdx  = {json.dumps(selected_word_idx)};
 
-            const idxToElement = new Map();
-            wordData.forEach(d => {{
-                const el = document.querySelector(`.word[data-idx="${{d.idx}}"]`);
-                if (el) idxToElement.set(d.idx, el);
-            }});
-
-            // 📥 【核心新增】：前端点击事件历史记录器与计数器
-            let clickHistory = []; 
-            let clickTimer = null;
-
-            window.addEventListener('load', function() {{
-                const words = document.querySelectorAll('.word');
-
-                words.forEach(el => {{
-                    // 1. 左键单击：前端秒开，同时在前端队列中累加计数
-                    el.addEventListener('click', function(e) {{
-                        if (e.button !== 0) return; 
-                        e.stopPropagation();
-
-                        if (clickTimer) clearTimeout(clickTimer);
-
-                        clickTimer = setTimeout(() => {{
-                            const idx = parseInt(el.dataset.idx, 10);
-                            try {{
-                                if (typeof handleClick === 'function') {{
-                                    handleClick(el); 
-                                }}
-                            }} catch (err) {{
-                                console.error('handleClick 内部报错:', err);
-                            }}
-
-                            // 🔥 秘密记录：把点击的单词索引存进前端历史数组
-                            clickHistory.push(idx);
-                            console.log("当前前端累计点击队列:", clickHistory);
-
-                            // 【联动后端】：将当前这句累计的所有点击，实时同步给 Streamlit 父页面，但【绝不刷新页面】
-                            syncClicksToParent();
-
-                        }}, 220); 
-                    }});
-
-                    // 2. 双击：加入生词本（允许强制同步）
-                    el.addEventListener('dblclick', function(e) {{
-                        e.stopPropagation();
-                        if (clickTimer) {{
-                            clearTimeout(clickTimer);
-                            clickTimer = null;
-                        }}
-                        notifyParent('wb', parseInt(this.dataset.idx, 10));
-                    }});
-                }});
-            }});
-
-            // 📡 【核心新增】：纯静默同步函数。利用 window.parent 动态无刷更新父级 URL 的 query 参数
-            // 这样当你点“下一句”按钮刷新网页时，主网页的 URL 里已经带上了你点过的所有完整数据！
-            function syncClicksToParent() {{
-                try {{
-                    // 打包所有的点击历史
-                    const payload = JSON.stringify({{a: 'log_batch', clicks: clickHistory}});
-
-                    // 绝妙之笔：直接修改父级浏览器的当前 URL 参数，而【完全不引发页面刷新】
-                    const parentUrl = window.parent.location.href;
-                    const url = new URL(parentUrl);
-                    url.searchParams.set('_ic', payload);
-
-                    // 使用 HTML5 pushState 静默替换父页面的 URL 地址栏
-                    window.parent.history.replaceState(null, null, url.toString());
-                }} catch (err) {{
-                    console.error("静默同步点击数据失败，可能是跨域受限:", err.message);
-                }}
-            }}
-
-            // 突破自建服务器 Nginx Referrer 限制的全新跨域中转函数
-            function notifyParent(action, idx) {{
-                try {{
-                    // 将行为和对应的历史点击队列一起打包
-                    const payload = {{
-                        from_iframe: true,
-                        a: action,
-                        i: idx,
-                        clicks: clickHistory
-                    }};
-                    // 🌟 核心改进：放弃危险的 location.href 修改，改用 W3C 标准的跨域安全通道
-                    // 向宿主父窗口发送密信，'*' 代表允许广播（或替换为您网站的具体域名）
-                    window.parent.postMessage(JSON.stringify(payload), '*');
-                    console.log("已通过安全通道发出数据: ", action, idx);
-                }} catch (err) {{
-                    console.error("前端通知主页面失败: ", err.message);
-                }}
-            }}
-
-            function handleClick(element) {{
-                clearHighlights(false);
-                const idx  = parseInt(element.dataset.idx, 10);
-                const data = wordData.find(d => d.idx === idx);
-                if (!data) return;
-
-                element.style.outline = '3px solid #39FF14';
-                data.deps.forEach(dep => {{
-                    const relEl = idxToElement.get(dep.position);
-                    if (relEl) relEl.style.outline = '3px solid #39FF14';
-                }});
-
-                showDependencies(data);
-            }}
-
-            function showDependencies(data) {{
-                const container = document.getElementById('depRelationContainer');
-                container.innerHTML = '';
-                const div = document.createElement('div');
-                div.className = 'dep-relation';
-                let h = '<div class="relation-title">Dependency relations:</div>';
-                if (data.deps.length === 0) {{
-                    h += '<div class="relation-item">No dependency relations for this word.</div>';
-                }} else {{
-                    data.deps.forEach(dep => {{
-                        const note  = deprelLabels[dep.deprel] || dep.deprel;
-                        const label = (note !== dep.deprel)
-                            ? note + ' (' + dep.deprel + ')' : dep.deprel;
-                        h += `<div class="relation-item">
-                            <strong>${{data.word}}</strong>
-                            ──${{label}}──&gt;
-                            <strong>${{dep.lemma}}</strong>
-                            </div>`;
-                    }});
-                }}
-                div.innerHTML = h;
-                container.appendChild(div);
-            }}
-
-            function clearHighlights(clearPanel) {{
-                document.querySelectorAll('.word').forEach(w => w.style.outline = '');
-                if (clearPanel !== false) {{
-                    document.getElementById('depRelationContainer').innerHTML = '';
-                }}
-            }}
-
-            document.addEventListener('click', function(e) {{
-                if (!e.target.classList.contains('word')) clearHighlights();
-            }});
-
-            if (selectedIdx !== null && selectedIdx >= 0) {{
-                const el = document.querySelector(`.word[data-idx="${{selectedIdx}}"]`);
-                if (el) handleClick(el);
-            }}
-        </script>
-    </body>
-    </html>"""
-    return full_html
-
-# ===================================================================
-# [改动4] Session 初始化 + 侧边栏
-# 认证：改用 auth.py 连接远程 FastAPI
-# 书籍选择：改用 book_registry.py，支持免费/付费分层
-# ===================================================================
-
-# ── 1. 全局核心 Session State 初始化 ──
-if "current_user" not in st.session_state:
-    # ✅ 修复：之前这里被写成了字符串 "paddle_reviewer"（真值），
-    # 导致每一个全新访客都被自动当成"已登录用户 paddle_reviewer"放行，
-    # 登录/注册表单也不会出现——所有匿名访客其实共享同一个账号。
-    # 未登录时必须是 None，才能触发下面的登录门禁。
-    st.session_state.current_user = None
-
-# ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
-render_auth_sidebar()
-
-if not st.session_state.current_user:
-    st.info("Please log in or register in the sidebar to start reading.")
-    st.stop()  # 🛑 没登录直接熔断，安全第一
-
-username = st.session_state.current_user
-
-# ── 守卫：username 必须是有效字符串，防止 True/None 写坏数据库 ──
-if not isinstance(username, str) or not username.strip():
-    st.info("Please log in or register in the sidebar to start reading.")
-    st.stop()
-
-# ── 2. 精准的状态重置 ──
-# 不要用一辈子只运行一次的 "states_initialized" 门禁！
-# 正确的做法：每次进入页面都允许它重置基础变量，确保点击新的单词时，老单词的依存残余会被洗掉
-reset_default_session_state()
-
-# ── 3. 打点计时专用，如果不存在才初始化 ──
-if "_sentence_enter_time" not in st.session_state:
-    st.session_state["_sentence_enter_time"] = {}
-if "_pending_behavior_save" not in st.session_state:
-    st.session_state["_pending_behavior_save"] = None
-
-# ── 订阅状态 + 付款入口 ──
-
-render_subscription_sidebar()
-
-# ── 💡 优雅替代方案：使用带有 TTL（生存时间）的缓存 ──
-# 假设你在 check_subscription 定义处或者这里，将其包装为一个限时缓存函数
-# 比如每隔 60 秒才真正去请求一次服务器，既能防止点击单词时瞬间卡顿，又能保证数据是最新活着的。
-
-@st.cache_data(ttl=60)  # 允许缓存 60 秒，60 秒内点击单词秒回，60 秒后自动刷新
 def get_cached_subscription(token):
     return check_subscription()
 
@@ -1937,134 +1751,16 @@ with tab1:
             save_progress()
             st.rerun()
 
-    # ── 渲染交互句子（左键高亮+日志，右键单词本）──
+    # ── 渲染交互式依存关系面板（CCv2 组件：左键高亮依存关系+记录点击日志，右键加入单词本）──
     sel_key = f"_selected_word_{book_name}_{display_sentence}"
     selected_word_idx = st.session_state.get(sel_key, -1)
 
-    # ─── 处理前端 iframe 传回的批量点击与生词本动作 ───
-    # ─── 【全新修正版】处理前端 iframe 传回的批量点击与生词本动作 ───
-    if st.query_params.get("_ic"):
-        need_rerun = False  # 💡 关键开关：初始化标记，默认绝不轻易刷新页面
-
-        try:
-            import json
-
-            raw_ic_data = st.query_params["_ic"]
-
-            # 1. 解析前端传来的复杂 JSON 数据
-            data_payload = json.loads(raw_ic_data)
-            action = data_payload.get("a")
-            idx = data_payload.get("i")
-            iframe_clicks = data_payload.get("clicks", [])  # 前端累积的点击历史数组
-
-            # 2. 🔥【修复左键计数】：将前端传过来的历史点击全额安全补录进缓存
-            if isinstance(iframe_clicks, list) and len(iframe_clicks) > 0:
-                current_click_log = st.session_state.get(click_cache_key, [])
-                last_key = f"_last_click_time_{book_name}_{sentence_id}"
-
-                for c_idx in iframe_clicks:
-                    if 0 <= c_idx < len(sentence_tokens):
-                        token = sentence_tokens[c_idx]
-                        if token.get("lemma"):  # 确保有词根
-                            now = time.time()
-                            last_click_time = st.session_state.get(last_key)
-                            dwell_ms = int((now - last_click_time) * 1000) if last_click_time else 0
-                            st.session_state[last_key] = now
-
-                            ev = _build_click_event(token, dwell_ms=dwell_ms)
-                            current_click_log.append(ev)
-
-                st.session_state[click_cache_key] = current_click_log
-                print(f"🔥 [后台统计成功] 成功合并录入点击 {len(iframe_clicks)} 次。")
-
-            # 3. 🔥【修复左键高亮消失】：记录最后一次点击的索引，供页面维持高亮
-            if idx is not None and isinstance(idx, int) and (0 <= idx < len(sentence_tokens)):
-                sel_key = f"_selected_word_{book_name}_{display_sentence}"
-                st.session_state[sel_key] = idx
-
-            # 4. 🔥【修复双击生词本】：将格式重组伪装，完美骗过老函数的严格校验
-            if action == "wb" and idx is not None:
-                # 重新拼装一个只包含普通单次动作的标准老版 JSON 字符串
-                compatible_payload = json.dumps({"a": "wb", "i": idx})
-
-                flash_msg = _process_iframe_word_action(
-                    compatible_payload,  # 👈 传入清洗后的纯净数据，不再传带有 clicks 的数据
-                    sentence_tokens,
-                    click_cache_key,
-                    book_name,
-                    sentence_id,
-                    display_sentence,
-                )
-                if flash_msg:
-                    st.session_state["global_toast"] = flash_msg
-
-                # 双击加入了生词本，需要刷新页面回显或弹出 Toast，此时才允许 rerun
-                need_rerun = True
-
-        except Exception as e:
-            print(f"解析批量点击数据包出错: {e}")
-
-        # 5. 🔥【生死宣判】：彻底解决全白和只加 1 次的死穴
-        # 清除当前的 query_params 参数，防止死循环
-        del st.query_params["_ic"]
-
-        # 核心：只有在发生了双击(wb)等确实需要后端重绘的操作时才允许 rerun！
-        # 如果只是左键点击查依存关系，need_rerun 为 False，后台静默放行，前端绿框和依存框瞬间丝滑显示！
-        if need_rerun:
-            st.rerun()
-
-    # if st.query_params.get("_ic"):
-    #     flash_msg = _process_iframe_word_action(
-    #         st.query_params["_ic"],
-    #         sentence_tokens,
-    #         click_cache_key,
-    #         book_name,
-    #         sentence_id,
-    #         display_sentence,
-    #     )
-    #     # ✨ 【方案3修改点】：不再用复杂的拼接 key，统一存入全局反馈键
-    #     if flash_msg:
-    #         st.session_state["global_toast"] = flash_msg
-    #
-    #     del st.query_params["_ic"]
-    #     st.rerun()
-
-    interactive_html = generate_interactive_sentence_html(
-        sentence_tokens, dep_map_by_position, dep_roles_by_position,
-        sentence_id, core_lemmas, modifier_lemmas,
-        book_name, display_sentence, st.session_state.get('simplify_mode'),
-        selected_word_idx=selected_word_idx)
-    components.html(interactive_html, height=480, scrolling=True)
-    # 2. 🌟 核心新增：Streamlit 端的跨域消息解包器 (无感静默接收)
-    # 这段嵌入式 JS 会在父页面运行，抓取 iframe 投递出来的生词本添加(wb)和点击队列(clicks)
-    receiver_html = """
-    <script>
-    window.addEventListener("message", function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            if (data && data.from_iframe) {
-                // 解析出点击历史以及具体的行为(如 wb)
-                const payload = JSON.stringify({
-                    a: data.a,
-                    i: data.i,
-                    clicks: data.clicks
-                });
-
-                // 安全注入到当前主页面的 URL 参数中
-                const url = new URL(window.location.href);
-                url.searchParams.set('_ic', payload);
-
-                // 静默更新地址栏，当用户点击“下一句”或者触发任何 Streamlit 组件时，后端便能一次性捕获
-                window.history.replaceState(null, null, url.toString());
-            }
-        } catch (e) {
-            // 忽略非 JSON 的系统杂乱消息
-        }
-    }, false);
-    </script>
-    """
-    # 将这个监听器静默挂载到页面上
-    components.html(receiver_html, height=0, width=0)
+    flash_msg = render_dependency_panel(
+        sentence_tokens, selected_word_idx, book_name,
+        sentence_id, display_sentence, click_cache_key,
+    )
+    if flash_msg:
+        st.session_state["global_toast"] = flash_msg
     flash_key = f"_flash_{book_name}_{display_sentence}"
     if flash_key in st.session_state:
         msg = st.session_state.pop(flash_key)
