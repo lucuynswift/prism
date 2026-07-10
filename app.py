@@ -1589,6 +1589,9 @@ with tab1:
         save_progress()
 
     enter_key = (book_name, display_sentence)
+    # 确保状态已经被初始化
+    if "_sentence_enter_time" not in st.session_state:
+        st.session_state["_sentence_enter_time"] = {}
     if enter_key not in st.session_state["_sentence_enter_time"]:
         st.session_state["_sentence_enter_time"][enter_key] = time.time()
 
