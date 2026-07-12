@@ -1384,12 +1384,59 @@ def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
     return flash_msg
 
 
+# ===================================================================
+# [改动4] Session 初始化 + 侧边栏
+# 认证：改用 auth.py 连接远程 FastAPI
+# 书籍选择：改用 book_registry.py，支持免费/付费分层
+# ===================================================================
+
+# ── 1. 全局核心 Session State 初始化 ──
+if "current_user" not in st.session_state:
+    # ✅ 修复：之前这里被写成了字符串 "paddle_reviewer"（真值），
+    # 导致每一个全新访客都被自动当成"已登录用户 paddle_reviewer"放行，
+    # 登录/注册表单也不会出现——所有匿名访客其实共享同一个账号。
+    # 未登录时必须是 None，才能触发下面的登录门禁。
+    st.session_state.current_user = None
+
+# ── 认证（必须保留熔断守卫，防止 guest 脏数据锁死 SQLite 数据库）──
+render_auth_sidebar()
+
+if not st.session_state.current_user:
+    st.info("Please log in or register in the sidebar to start reading.")
+    st.stop()  # 🛑 没登录直接熔断，安全第一
+
+username = st.session_state.current_user
+
+# ── 守卫：username 必须是有效字符串，防止 True/None 写坏数据库 ──
+if not isinstance(username, str) or not username.strip():
+    st.info("Please log in or register in the sidebar to start reading.")
+    st.stop()
+
+# ── 2. 精准的状态重置 ──
+# 不要用一辈子只运行一次的 "states_initialized" 门禁！
+# 正确的做法：每次进入页面都允许它重置基础变量，确保点击新的单词时，老单词的依存残余会被洗掉
+reset_default_session_state()
+
+# ── 3. 打点计时专用，如果不存在才初始化 ──
+if "_sentence_enter_time" not in st.session_state:
+    st.session_state["_sentence_enter_time"] = {}
+if "_pending_behavior_save" not in st.session_state:
+    st.session_state["_pending_behavior_save"] = None
+
+# ── 订阅状态 + 付款入口 ──
+
+render_subscription_sidebar()
+
+# ── 💡 优雅替代方案：使用带有 TTL（生存时间）的缓存 ──
+# 假设你在 check_subscription 定义处或者这里，将其包装为一个限时缓存函数
+# 比如每隔 60 秒才真正去请求一次服务器，既能防止点击单词时瞬间卡顿，又能保证数据是最新活着的。
+
+@st.cache_data(ttl=60)  # 允许缓存 60 秒，60 秒内点击单词秒回，60 秒后自动刷新
 def get_cached_subscription(token):
     return check_subscription()
 
 # 直接获取，不用再塞进 st.session_state 造成状态污染
 token = st.session_state.get("auth_token")
-username = st.session_state.get("username")
 sub = get_cached_subscription(token) if token else {"subscribed": False}
 # ── [改动5] 免费体验策略 ──────────────────────────────────────────
 # 注册后 14 天：全功能不限量
@@ -1589,12 +1636,6 @@ with tab1:
         save_progress()
 
     enter_key = (book_name, display_sentence)
-    # 确保状态已经被初始化
-    if "_sentence_enter_time" not in st.session_state:
-        st.session_state["_sentence_enter_time"] = {}
-    if "_pending_behavior_save" not in st.session_state:
-        st.session_state["_pending_behavior_save"] = None
-
     if enter_key not in st.session_state["_sentence_enter_time"]:
         st.session_state["_sentence_enter_time"][enter_key] = time.time()
 
