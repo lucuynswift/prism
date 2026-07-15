@@ -1042,12 +1042,80 @@ def append_behavior_record(username: str, record: dict):
 # ===================================================================
 # [Fix-A] 修复后的句子 token 构建函数
 # 直接把 dep_map_by_position 里的依存信息 embed 进每个 token，
-# 彻底避免事后用 idx 查找时因 spaCy token id 与 split() 位置错位导致 deps 为空。
+# 彻底避免事后用 idx 查找时因 Stanza token id 与 split() 位置错位导致 deps 为空。
 # ===================================================================
 # def build_sentence_tokens(sentence_text: str,
 #                            sentence_deltas: list,
 #                            display_sentence: int,
 #                            dep_map_by_position: dict | None = None) -> list:
+
+def align_dep_positions_to_split(sentence_text: str, sent_deps: list) -> dict:
+    """
+    依存关系数据（dependencies.csv 的 dependent_id/head_id）用的是 Stanza 自己的
+    分词位置；而 sentence_tokens / dep_map_by_position 的查找键用的是
+    sentence_text.split() 的位置。两者在遇到缩写（don't → do/n't）、
+    连字符词等情况下会出现错位——这正是"点击某个词，却高亮/展示了旁边
+    另一个词"的根本原因（此前是因为点击整体不通所以没显现出来）。
+
+    这里用清洗后的字符做启发式顺序对齐，返回 {Stanza位置: split位置} 映射。
+    如果两边分词数量完全一致（绝大多数句子如此），直接按 1:1 对应，
+    不引入任何启发式风险；只有数量不一致时才做贪心合并对齐。
+    """
+    if not sent_deps:
+        return {}
+
+    parser_items = []
+    seen_pos = set()
+    for r in sent_deps:
+        try:
+            pos = int(r.get("dependent_id", "")) - 1
+        except (ValueError, TypeError):
+            continue
+        if pos < 0 or pos in seen_pos:
+            continue
+        seen_pos.add(pos)
+        parser_items.append((pos, str(r.get("dependent_text", ""))))
+    parser_items.sort(key=lambda x: x[0])
+
+    split_words = sentence_text.split()
+
+    # 数量一致 → 直接 1:1，最安全
+    if len(parser_items) == len(split_words):
+        return {pos: i for i, (pos, _txt) in enumerate(parser_items)}
+
+    # 数量不一致 → 按清洗后字符做贪心合并对齐
+    mapping = {}
+    si = 0
+    for split_idx, sw in enumerate(split_words):
+        target = clean_word(sw)
+        if not target:
+            continue
+        acc = ""
+        while si < len(parser_items) and len(acc) < len(target):
+            pos, text = parser_items[si]
+            acc += clean_word(text)
+            mapping[pos] = split_idx
+            si += 1
+    return mapping
+
+
+def remap_dep_map_by_position(dep_map_by_position: dict, alignment: dict) -> dict:
+    """用 align_dep_positions_to_split 得到的映射，把 dep_map_by_position 的
+    key（依存词自身位置）和 value 里的 head 位置都统一改写成 split 位置体系，
+    这样 build_sentence_tokens 里 `dep_map_by_position.get(split_idx, [])`
+    的直接查找就是对齐的了，不需要改动 build_sentence_tokens 本身。"""
+    if not alignment:
+        return dep_map_by_position
+    remapped = {}
+    for dep_pos, edges in dep_map_by_position.items():
+        new_dep_pos = alignment.get(dep_pos, dep_pos)
+        new_edges = [
+            (alignment.get(head_pos, head_pos), rel, head_lemma)
+            for head_pos, rel, head_lemma in edges
+        ]
+        remapped.setdefault(new_dep_pos, []).extend(new_edges)
+    return remapped
+
 
 def build_sentence_tokens(sentence_text: str,
                           display_sentence: int,
@@ -1202,18 +1270,29 @@ _DEP_PANEL_HTML = """
 """
 
 _DEP_PANEL_CSS = """
+/* 恢复你原来的米黄纸张配色（#F5E6C8）——这是刻意的"阅读纸张"设计，
+   跟系统深色/浅色主题无关（类似 Kindle 的 sepia 模式），所以这里不用
+   --st-background-color 这类会随主题变化的变量，而是直接写死暖色调，
+   并配一个足够深的墨色文字，保证在纸张色背景上始终清晰可读。 */
 .dep-panel-sentence {
-    line-height: 2.3;
-    padding: 6px 2px 10px 2px;
+    font-size: 28px;
+    line-height: 2.5;
+    padding: 20px;
+    background: #F5E6C8;
+    color: #3E2E1E;
+    font-family: Arial, sans-serif;
+    border-radius: 10px;
+    cursor: default;
 }
 .dep-word {
     cursor: pointer;
-    padding: 1px 2px;
-    border-radius: 4px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: background-color 0.2s;
 }
-.dep-word:hover {
-    background: rgba(120, 120, 120, 0.15);
-}
+.dep-word:hover { background-color: #f0f0f0; }
+.dep-word.dep-core     { font-weight: bold; }
+.dep-word.dep-modifier { font-style: italic; }
 .dep-word.dep-active {
     outline: 2px solid #39FF14;
     background: rgba(57, 255, 20, 0.15);
@@ -1222,16 +1301,18 @@ _DEP_PANEL_CSS = """
     outline: 2px dashed #1E90FF;
     background: rgba(30, 144, 255, 0.12);
 }
-.dep-punct { color: #888; }
+.dep-punct { color: #555555; font-size: 15px; font-family: Merriweather, serif; }
 .dep-panel-relations {
-    margin-top: 6px;
-    padding-top: 8px;
-    border-top: 1px solid rgba(120, 120, 120, 0.25);
-    font-size: 0.85rem;
+    margin-top: 15px;
+    padding: 15px;
+    background: #e3f2fd;
+    border-radius: 8px;
+    font-size: 16px;
+    border-left: 4px solid #2196F3;
 }
-.dep-rel-title { font-weight: 600; margin-bottom: 4px; opacity: 0.8; }
-.dep-rel-item { padding: 2px 0; }
-.dep-rel-empty { opacity: 0.6; font-style: italic; }
+.dep-rel-title { font-weight: bold; margin-bottom: 8px; color: #1976D2; }
+.dep-rel-item  { margin: 5px 0; padding: 5px; background: white; border-radius: 4px; color: #333; }
+.dep-rel-empty { opacity: 0.7; font-style: italic; color: #3E2E1E; }
 """
 
 _DEP_PANEL_JS = """
@@ -1251,10 +1332,17 @@ export default function(component) {
         const span = document.createElement('span');
         span.textContent = tok.display + ' ';
         if (tok.lemma) {
-            span.className = 'dep-word';
+            let cls = 'dep-word';
+            if (tok.isCore) cls += ' dep-core';
+            if (tok.isModifier) cls += ' dep-modifier';
+            span.className = cls;
+            // data-idx 是"这个 span 到底代表哪个词"的唯一权威来源；
+            // 点击/右键时一律从被点击的元素本身读取它，不依赖任何闭包变量，
+            // 避免因为组件重新挂载、事件延迟触发等时序问题导致点 A 却高亮了 B。
             span.dataset.idx = String(tok.idx);
             if (tok.color) span.style.color = tok.color;
             if (tok.fontSize) span.style.fontSize = tok.fontSize;
+            if (tok.fontFamily) span.style.fontFamily = tok.fontFamily;
             idxToEl.set(tok.idx, span);
         } else {
             span.className = 'dep-punct';
@@ -1303,16 +1391,18 @@ export default function(component) {
         return tok;
     }
 
-    idxToEl.forEach((el, idx) => {
+    idxToEl.forEach((el) => {
         // 左键：本地立即高亮 + 展示依存关系，同时上报后端记录日志
         el.addEventListener('click', (e) => {
             e.preventDefault();
+            const idx = parseInt(e.currentTarget.dataset.idx, 10);
             highlight(idx);
             setTriggerValue('word_click', { idx: idx, ts: Date.now() });
         });
         // 右键：阻止浏览器默认右键菜单，改为加入单词本
         el.addEventListener('contextmenu', (e) => {
             e.preventDefault();
+            const idx = parseInt(e.currentTarget.dataset.idx, 10);
             setTriggerValue('add_wordbook', { idx: idx, ts: Date.now() });
         });
     });
@@ -1334,22 +1424,30 @@ _dep_panel_component = st.components.v2.component(
 
 
 def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
-                             sentence_id, display_sentence, click_cache_key):
+                             sentence_id, display_sentence, click_cache_key,
+                             core_lemmas=None, modifier_lemmas=None):
     """挂载 CCv2 依存关系面板，并处理其回传的左键/右键事件。
     返回一条 flash 提示信息（没有事件则返回 None）。
     """
+    core_lemmas = core_lemmas or set()
+    modifier_lemmas = modifier_lemmas or set()
+
     token_payload = []
     for i, tok in enumerate(sentence_tokens):
         if not tok.get("lemma"):
             token_payload.append({"idx": i, "display": tok["display"], "lemma": None})
             continue
-        font_size, _ = get_font_style_by_frequency(tok.get("freq", 1))
+        font_size, font_family = get_font_style_by_frequency(tok.get("freq", 1))
+        lemma = tok["lemma"]
         token_payload.append({
             "idx": i,
             "display": tok["display"],
-            "lemma": tok["lemma"],
+            "lemma": lemma,
             "color": get_color(tok.get("freq", 1)),
             "fontSize": font_size,
+            "fontFamily": font_family,
+            "isCore": lemma in core_lemmas,
+            "isModifier": lemma in modifier_lemmas,
             "deps": tok.get("deps_info", []),
         })
 
@@ -1736,7 +1834,11 @@ with tab1:
     # 结构预期是：{ 0: 频次, 1: 频次, 2: 频次 ... }，键是单词在句中的索引
     current_sentence_freqs = all_lemma_positions.get(sentence_id, {})
 
-    # 3. 极简调用
+    # 3. 修正 Stanza 依存位置 与 .split() 位置的错位（点击跳词的根因）
+    _dep_alignment = align_dep_positions_to_split(sentence_text, sent_deps)
+    dep_map_by_position = remap_dep_map_by_position(dep_map_by_position, _dep_alignment)
+
+    # 4. 极简调用
     sentence_tokens = build_sentence_tokens(
         sentence_text=sentence_text,
         display_sentence=display_sentence,
@@ -1806,6 +1908,7 @@ with tab1:
     flash_msg = render_dependency_panel(
         sentence_tokens, selected_word_idx, book_name,
         sentence_id, display_sentence, click_cache_key,
+        core_lemmas, modifier_lemmas,
     )
     if flash_msg:
         st.session_state["global_toast"] = flash_msg
