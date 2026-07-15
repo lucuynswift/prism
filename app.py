@@ -1055,43 +1055,6 @@ def append_behavior_record(username: str, record: dict):
 #                            display_sentence: int,
 #                            dep_map_by_position: dict | None = None) -> list:
 
-def build_stanza_aligned_sentence_text(sentence_text: str, sent_deps: list) -> str:
-    """
-    彻底修复依存位置错位问题（此前用启发式对齐，在缩写词/重复词等情况下
-    仍会出错）。做法：不再依赖 sentence_text.split() 这套独立分词，而是
-    直接用 Stanza 自己在 dependencies.csv 里给出的分词顺序
-    （按 dependent_id 排序、取 dependent_text）重新拼出一句话。
-    这样 split_idx 与 dependent_id-1 永远是同一套位置体系，
-    不存在任何错位可能——哪怕句子里同一个词出现多次，
-    因为每次出现的 dependent_id 本来就是唯一的，天然区分。
-    如果 sent_deps 为空（没有依存数据），原样返回 sentence_text 兜底。
-    """
-    if not sent_deps:
-        return sentence_text
-
-    ordered = []
-    for r in sent_deps:
-        try:
-            pos = int(r.get("dependent_id", "")) - 1
-        except (ValueError, TypeError):
-            continue
-        if pos < 0:
-            continue
-        text = str(r.get("dependent_text", "")).strip()
-        if not text:
-            continue
-        ordered.append((pos, text))
-
-    if not ordered:
-        return sentence_text
-
-    ordered.sort(key=lambda x: x[0])
-    # 防御：若 dependent_id 有缺失导致位置不连续，按排序后的顺序重排即可，
-    # 不依赖具体数值是否连续，只依赖相对先后顺序。
-    words = [text for _pos, text in ordered]
-    return " ".join(words)
-
-
 def build_sentence_tokens(sentence_text: str,
                           display_sentence: int,
                           dep_map_by_position: dict | None = None,
@@ -1773,9 +1736,7 @@ with tab1:
                     dep_roles_by_position[dep_pos]['as_dependent'].add(rel)
                 if head_pos >= 0:
                     dep_roles_by_position[head_pos]['as_head'].add(rel)
-                if dep_pos >= 0 and head_pos >= 0 and not dep_map_by_position[dep_pos]:
-                    # 每个词在依存树里只有唯一一个 head；只取第一条，
-                    # 防止 CSV 里偶发的重复行导致同一个词被挂上多个"头"
+                if dep_pos >= 0 and head_pos >= 0:
                     dep_map_by_position[dep_pos].append((head_pos, rel, head_lemma))
             except (ValueError, TypeError):
                 pass
@@ -1824,13 +1785,9 @@ with tab1:
     # 结构预期是：{ 0: 频次, 1: 频次, 2: 频次 ... }，键是单词在句中的索引
     current_sentence_freqs = all_lemma_positions.get(sentence_id, {})
 
-    # 3. 用 Stanza 自己的分词顺序重建句子文本，彻底消除位置错位
-    #    （替代之前的启发式对齐——那种方式在部分句子上仍可能出错）
-    stanza_aligned_text = build_stanza_aligned_sentence_text(sentence_text, sent_deps)
-
-    # 4. 极简调用
+    # 3. 极简调用（回退：不再做任何位置重建/对齐，直接用原始 sentence_text）
     sentence_tokens = build_sentence_tokens(
-        sentence_text=stanza_aligned_text,
+        sentence_text=sentence_text,
         display_sentence=display_sentence,
         dep_map_by_position=dep_map_by_position,
         current_sentence_freqs=current_sentence_freqs  # 👈 传入查好的字典
