@@ -207,4 +207,10 @@ BOOK_REGISTRY = {
         "description": "A classic satirical novel about a dangerous femme fatale at Oxford.",
         "free": True,
     },
+    "Alice’s Adventures in Wonderland": {
+        "slug": "Alice’s Adventures in Wonderland",
+        "repo": "/opt/prism/app/books/Alice’s Adventures in Wonderland",
+        "description": "A classic fantasy novel about a young girl who tumbles down a rabbit hole into a whimsical, nonsensical world filled with peculiar creatures.",
+        "free": True,
+    },
 }
