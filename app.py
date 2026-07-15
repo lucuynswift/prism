@@ -853,8 +853,14 @@ def save_progress():
     Saves user reading progress and wordbook data.
     Synchronizes with the remote FastAPI server to achieve permanent persistence.
     """
-    username = st.session_state.get("username")
-    token = st.session_state.get("token")
+    # 修复：全局登录状态实际存在 st.session_state["current_user"] /
+    # st.session_state["auth_token"] 里（见 auth.py 登录流程 & 顶层
+    # `token = st.session_state.get("auth_token")`）。
+    # 这里原来读的是 "username"/"token" 这两个从未被写入过的键，
+    # 导致 username/token 恒为 None，每次都被判定为"未登录"直接跳过保存——
+    # 这就是"进度、单词本保存不了"的根本原因。
+    username = st.session_state.get("current_user")
+    token = st.session_state.get("auth_token")
 
     if not username or not token:
         print("Save skipped: User not logged in or token missing.")
@@ -900,8 +906,8 @@ def load_progress():
     Loads user reading progress and wordbook data from the remote FastAPI server.
     Ensures state synchronization across devices and sessions.
     """
-    username = st.session_state.get("username")
-    token = st.session_state.get("token")
+    username = st.session_state.get("current_user")
+    token = st.session_state.get("auth_token")
 
     if not username or not token:
         print("Load skipped: User not logged in or token missing.")
@@ -1049,72 +1055,41 @@ def append_behavior_record(username: str, record: dict):
 #                            display_sentence: int,
 #                            dep_map_by_position: dict | None = None) -> list:
 
-def align_dep_positions_to_split(sentence_text: str, sent_deps: list) -> dict:
+def build_stanza_aligned_sentence_text(sentence_text: str, sent_deps: list) -> str:
     """
-    依存关系数据（dependencies.csv 的 dependent_id/head_id）用的是 Stanza 自己的
-    分词位置；而 sentence_tokens / dep_map_by_position 的查找键用的是
-    sentence_text.split() 的位置。两者在遇到缩写（don't → do/n't）、
-    连字符词等情况下会出现错位——这正是"点击某个词，却高亮/展示了旁边
-    另一个词"的根本原因（此前是因为点击整体不通所以没显现出来）。
-
-    这里用清洗后的字符做启发式顺序对齐，返回 {Stanza位置: split位置} 映射。
-    如果两边分词数量完全一致（绝大多数句子如此），直接按 1:1 对应，
-    不引入任何启发式风险；只有数量不一致时才做贪心合并对齐。
+    彻底修复依存位置错位问题（此前用启发式对齐，在缩写词/重复词等情况下
+    仍会出错）。做法：不再依赖 sentence_text.split() 这套独立分词，而是
+    直接用 Stanza 自己在 dependencies.csv 里给出的分词顺序
+    （按 dependent_id 排序、取 dependent_text）重新拼出一句话。
+    这样 split_idx 与 dependent_id-1 永远是同一套位置体系，
+    不存在任何错位可能——哪怕句子里同一个词出现多次，
+    因为每次出现的 dependent_id 本来就是唯一的，天然区分。
+    如果 sent_deps 为空（没有依存数据），原样返回 sentence_text 兜底。
     """
     if not sent_deps:
-        return {}
+        return sentence_text
 
-    parser_items = []
-    seen_pos = set()
+    ordered = []
     for r in sent_deps:
         try:
             pos = int(r.get("dependent_id", "")) - 1
         except (ValueError, TypeError):
             continue
-        if pos < 0 or pos in seen_pos:
+        if pos < 0:
             continue
-        seen_pos.add(pos)
-        parser_items.append((pos, str(r.get("dependent_text", ""))))
-    parser_items.sort(key=lambda x: x[0])
-
-    split_words = sentence_text.split()
-
-    # 数量一致 → 直接 1:1，最安全
-    if len(parser_items) == len(split_words):
-        return {pos: i for i, (pos, _txt) in enumerate(parser_items)}
-
-    # 数量不一致 → 按清洗后字符做贪心合并对齐
-    mapping = {}
-    si = 0
-    for split_idx, sw in enumerate(split_words):
-        target = clean_word(sw)
-        if not target:
+        text = str(r.get("dependent_text", "")).strip()
+        if not text:
             continue
-        acc = ""
-        while si < len(parser_items) and len(acc) < len(target):
-            pos, text = parser_items[si]
-            acc += clean_word(text)
-            mapping[pos] = split_idx
-            si += 1
-    return mapping
+        ordered.append((pos, text))
 
+    if not ordered:
+        return sentence_text
 
-def remap_dep_map_by_position(dep_map_by_position: dict, alignment: dict) -> dict:
-    """用 align_dep_positions_to_split 得到的映射，把 dep_map_by_position 的
-    key（依存词自身位置）和 value 里的 head 位置都统一改写成 split 位置体系，
-    这样 build_sentence_tokens 里 `dep_map_by_position.get(split_idx, [])`
-    的直接查找就是对齐的了，不需要改动 build_sentence_tokens 本身。"""
-    if not alignment:
-        return dep_map_by_position
-    remapped = {}
-    for dep_pos, edges in dep_map_by_position.items():
-        new_dep_pos = alignment.get(dep_pos, dep_pos)
-        new_edges = [
-            (alignment.get(head_pos, head_pos), rel, head_lemma)
-            for head_pos, rel, head_lemma in edges
-        ]
-        remapped.setdefault(new_dep_pos, []).extend(new_edges)
-    return remapped
+    ordered.sort(key=lambda x: x[0])
+    # 防御：若 dependent_id 有缺失导致位置不连续，按排序后的顺序重排即可，
+    # 不依赖具体数值是否连续，只依赖相对先后顺序。
+    words = [text for _pos, text in ordered]
+    return " ".join(words)
 
 
 def build_sentence_tokens(sentence_text: str,
@@ -1297,7 +1272,7 @@ _DEP_PANEL_CSS = """
     outline: 2px solid #39FF14;
     background: rgba(57, 255, 20, 0.15);
 }
-.dep-word.dep-related {
+.dep-word.dep-head {
     outline: 2px dashed #1E90FF;
     background: rgba(30, 144, 255, 0.12);
 }
@@ -1351,42 +1326,44 @@ export default function(component) {
     });
 
     function clearHighlights() {
-        idxToEl.forEach((el) => el.classList.remove('dep-active', 'dep-related'));
+        idxToEl.forEach((el) => el.classList.remove('dep-active', 'dep-head'));
     }
 
     function renderRelations(tok) {
         relationsEl.innerHTML = '';
         const title = document.createElement('div');
         title.className = 'dep-rel-title';
-        title.textContent = 'Dependency relations for "' + tok.display + '":';
+        title.textContent = 'Dependency relation for "' + tok.display + '":';
         relationsEl.appendChild(title);
 
-        if (!tok.deps || tok.deps.length === 0) {
+        if (!tok.head) {
             const empty = document.createElement('div');
             empty.className = 'dep-rel-empty';
-            empty.textContent = 'No dependency relations found for this word.';
+            empty.textContent = tok.isRoot
+                ? 'This is the root of the sentence (no governing word).'
+                : 'No dependency relation found for this word.';
             relationsEl.appendChild(empty);
             return;
         }
-        tok.deps.forEach((dep) => {
-            const label = deprelLabels[dep.deprel] || dep.deprel;
-            const line = document.createElement('div');
-            line.className = 'dep-rel-item';
-            line.textContent = tok.display + '  \\u2500\\u2500' + label + '\\u2500\\u2500\\u25B6  ' + dep.head_lemma;
-            relationsEl.appendChild(line);
-        });
+        const label = deprelLabels[tok.head.deprel] || tok.head.deprel;
+        const line = document.createElement('div');
+        line.className = 'dep-rel-item';
+        line.textContent = tok.display + '  \\u2500\\u2500' + label + '\\u2500\\u2500\\u25B6  ' + tok.head.head_lemma;
+        relationsEl.appendChild(line);
     }
 
+    // 每个词在依存语法里只有唯一一个 head（支配词），所以每次点击
+    // 只会高亮两个元素：当前词本身（实线框）+ 它唯一的 head（虚线框）。
     function highlight(idx) {
         const tok = tokens.find((t) => t.idx === idx);
         if (!tok) return null;
         clearHighlights();
         const el = idxToEl.get(idx);
         if (el) el.classList.add('dep-active');
-        (tok.deps || []).forEach((dep) => {
-            const relEl = idxToEl.get(dep.position);
-            if (relEl) relEl.classList.add('dep-related');
-        });
+        if (tok.head) {
+            const headEl = idxToEl.get(tok.head.position);
+            if (headEl) headEl.classList.add('dep-head');
+        }
         renderRelations(tok);
         return tok;
     }
@@ -1439,6 +1416,9 @@ def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
             continue
         font_size, font_family = get_font_style_by_frequency(tok.get("freq", 1))
         lemma = tok["lemma"]
+        deps_info = tok.get("deps_info", [])
+        # 每个词在依存树里只有唯一一个 head；取第一条（正常数据下也只会有一条）
+        head = deps_info[0] if deps_info else None
         token_payload.append({
             "idx": i,
             "display": tok["display"],
@@ -1448,7 +1428,8 @@ def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
             "fontFamily": font_family,
             "isCore": lemma in core_lemmas,
             "isModifier": lemma in modifier_lemmas,
-            "deps": tok.get("deps_info", []),
+            "head": head,
+            "isRoot": head is None,
         })
 
     result = _dep_panel_component(
@@ -1520,6 +1501,13 @@ if "_sentence_enter_time" not in st.session_state:
     st.session_state["_sentence_enter_time"] = {}
 if "_pending_behavior_save" not in st.session_state:
     st.session_state["_pending_behavior_save"] = None
+
+# ── 3.5 本次会话首次进入时，从云端把已保存的进度/单词本拉回来 ──
+# （load_progress 之前定义了但从没被调用过，导致哪怕保存成功了，
+#   下次打开也看不到——只加一次性 guard，避免每次 rerun 都打一次 API）
+if not st.session_state.get("_progress_loaded_once"):
+    load_progress()
+    st.session_state["_progress_loaded_once"] = True
 
 # ── 订阅状态 + 付款入口 ──
 
@@ -1785,7 +1773,9 @@ with tab1:
                     dep_roles_by_position[dep_pos]['as_dependent'].add(rel)
                 if head_pos >= 0:
                     dep_roles_by_position[head_pos]['as_head'].add(rel)
-                if dep_pos >= 0 and head_pos >= 0:
+                if dep_pos >= 0 and head_pos >= 0 and not dep_map_by_position[dep_pos]:
+                    # 每个词在依存树里只有唯一一个 head；只取第一条，
+                    # 防止 CSV 里偶发的重复行导致同一个词被挂上多个"头"
                     dep_map_by_position[dep_pos].append((head_pos, rel, head_lemma))
             except (ValueError, TypeError):
                 pass
@@ -1834,13 +1824,13 @@ with tab1:
     # 结构预期是：{ 0: 频次, 1: 频次, 2: 频次 ... }，键是单词在句中的索引
     current_sentence_freqs = all_lemma_positions.get(sentence_id, {})
 
-    # 3. 修正 Stanza 依存位置 与 .split() 位置的错位（点击跳词的根因）
-    _dep_alignment = align_dep_positions_to_split(sentence_text, sent_deps)
-    dep_map_by_position = remap_dep_map_by_position(dep_map_by_position, _dep_alignment)
+    # 3. 用 Stanza 自己的分词顺序重建句子文本，彻底消除位置错位
+    #    （替代之前的启发式对齐——那种方式在部分句子上仍可能出错）
+    stanza_aligned_text = build_stanza_aligned_sentence_text(sentence_text, sent_deps)
 
     # 4. 极简调用
     sentence_tokens = build_sentence_tokens(
-        sentence_text=sentence_text,
+        sentence_text=stanza_aligned_text,
         display_sentence=display_sentence,
         dep_map_by_position=dep_map_by_position,
         current_sentence_freqs=current_sentence_freqs  # 👈 传入查好的字典
