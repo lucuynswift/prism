@@ -878,11 +878,23 @@ def save_progress():
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
+
+        # 修复："阅读记录没有保存"：user_progress 这个键此前只被读取、
+        # 从没被写入过，真正的阅读位置存在 view_sentence_{book_name}
+        # 这些每本书各自的 session_state 键里，两边一直没打通，
+        # 导致发送到服务器的 progress 永远是空字典。
+        # 这里在保存前扫一遍所有书籍的当前阅读位置，同步进 user_progress。
+        progress = st.session_state.get("user_progress", {})
+        for _k, _v in list(st.session_state.items()):
+            if isinstance(_k, str) and _k.startswith("view_sentence_") and isinstance(_v, int):
+                progress[_k[len("view_sentence_"):]] = _v
+        st.session_state["user_progress"] = progress
+
         # Pack the data to be synchronized to the cloud database
         payload = {
             "username": username,
             "wordbook": st.session_state.get("user_wordbook", []),
-            "progress": st.session_state.get("user_progress", {})
+            "progress": progress
         }
 
         # Send data to the remote server via POST request
@@ -927,7 +939,14 @@ def load_progress():
             data = response.json()
             # Synchronize cloud data back into Streamlit memory state
             st.session_state["user_wordbook"] = data.get("wordbook", [])
-            st.session_state["user_progress"] = data.get("progress", {})
+            loaded_progress = data.get("progress", {})
+            st.session_state["user_progress"] = loaded_progress
+            # 同上：光存进 user_progress 没用，还得写回
+            # view_sentence_{book_name} 这些真正驱动"当前显示第几句"的键，
+            # 否则下次登录界面还是从头开始，阅读位置等于没恢复。
+            for _bk, _sent_idx in loaded_progress.items():
+                if isinstance(_sent_idx, int):
+                    st.session_state[f"view_sentence_{_bk}"] = _sent_idx
             print("Successfully loaded progress and wordbook from FastAPI.")
             return True
         else:
@@ -1231,6 +1250,7 @@ _DEP_PANEL_CSS = """
 .dep-word:hover { background-color: #f0f0f0; }
 .dep-word.dep-core     { font-weight: bold; }
 .dep-word.dep-modifier { font-style: italic; }
+.dep-word.dep-faded { opacity: 0.2; }
 .dep-word.dep-active {
     outline: 2px solid #39FF14;
     background: rgba(57, 255, 20, 0.15);
@@ -1273,6 +1293,7 @@ export default function(component) {
             let cls = 'dep-word';
             if (tok.isCore) cls += ' dep-core';
             if (tok.isModifier) cls += ' dep-modifier';
+            if (tok.faded) cls += ' dep-faded';
             span.className = cls;
             // data-idx 是"这个 span 到底代表哪个词"的唯一权威来源；
             // 点击/右键时一律从被点击的元素本身读取它，不依赖任何闭包变量，
@@ -1365,12 +1386,40 @@ _dep_panel_component = st.components.v2.component(
 
 def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
                              sentence_id, display_sentence, click_cache_key,
-                             core_lemmas=None, modifier_lemmas=None):
+                             core_lemmas=None, modifier_lemmas=None,
+                             dep_roles_by_position=None):
     """挂载 CCv2 依存关系面板，并处理其回传的左键/右键事件。
     返回一条 flash 提示信息（没有事件则返回 None）。
     """
     core_lemmas = core_lemmas or set()
     modifier_lemmas = modifier_lemmas or set()
+    dep_roles_by_position = dep_roles_by_position or {}
+
+    # 修复"句子简化模块失效"：之前 5 个按钮只是把
+    # st.session_state.simplify_mode 改了个名字显示在 caption 里，
+    # 从没有任何代码真正读取这个值去影响句子的展示——点了等于白点。
+    # 这里根据每个词自己的依存关系（作为 dependent 时的 deprel）
+    # 判断它属于 SVO 核心成分、定语修饰、状语修饰还是补语，
+    # 不符合当前模式的词做淡化处理（保留位置/可点击，只是视觉上弱化，
+    # 不做硬删除，避免句子结构断裂、间距错乱）。
+    simplify_mode = st.session_state.get("simplify_mode")
+    core_svo_rels = {"nsubj", "nsubj:pass", "obj", "iobj", "csubj", "csubj:pass",
+                      "root", "ROOT", "cop", "aux"}
+    complement_rels = {"ccomp", "xcomp", "acomp", "attr"}
+
+    def _should_fade(idx: int) -> bool:
+        if not simplify_mode:
+            return False
+        own_rels = dep_roles_by_position.get(idx, {}).get("as_dependent", set())
+        if simplify_mode == "svo_only":
+            return not (own_rels & core_svo_rels)
+        if simplify_mode == "no_amod":
+            return "amod" in own_rels
+        if simplify_mode == "no_advmod":
+            return "advmod" in own_rels
+        if simplify_mode == "no_complement":
+            return bool(own_rels & complement_rels)
+        return False
 
     token_payload = []
     for i, tok in enumerate(sentence_tokens):
@@ -1393,6 +1442,7 @@ def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
             "isModifier": lemma in modifier_lemmas,
             "head": head,
             "isRoot": head is None,
+            "faded": _should_fade(i),
         })
 
     result = _dep_panel_component(
@@ -1422,6 +1472,20 @@ def render_dependency_panel(sentence_tokens, selected_word_idx, book_name,
             click_cache_key, book_name, sentence_id, display_sentence,
         )
         flash_msg = wb_msg or flash_msg
+
+    # ⚠️ 关键修复："点当前词却跳到上一个词"的根因：
+    # 上面传给组件挂载的 data["selectedIdx"] 是本次渲染开始时读到的旧值
+    # （处理点击之前的 sel_key），而 _process_word_action 更新 sel_key
+    # 是在挂载之后才发生的——这一轮组件收到的仍是上一次点击的 selectedIdx，
+    # 会把浏览器里刚刚正确显示的高亮又"纠正"回上一个词。
+    # 同理，右键加入单词本时 idx 取值本身没错，但由于同一轮里视觉状态被
+    # 旧 selectedIdx 覆盖，容易被误解成"操作的是上一个词"。
+    # 用 st.rerun() 强制立即重跑一次：下一轮读到的 sel_key 就是刚处理完的
+    # 最新值，selectedIdx 不再滞后一步。
+    if click_event or wb_event:
+        if flash_msg:
+            st.session_state["global_toast"] = flash_msg
+        st.rerun()
 
     return flash_msg
 
@@ -1856,6 +1920,7 @@ with tab1:
         sentence_tokens, selected_word_idx, book_name,
         sentence_id, display_sentence, click_cache_key,
         core_lemmas, modifier_lemmas,
+        dep_roles_by_position=dep_roles_by_position,
     )
     if flash_msg:
         st.session_state["global_toast"] = flash_msg
@@ -2156,7 +2221,8 @@ function copyText2(){{_doCopy();}}
 
     with ctrl_col1:
         if display_sentence > 0:
-            if st.button("← Previous", key=f"prev_btn_v3_{book_name}_{display_sentence}", use_container_width=True):
+            # 同 Next 按钮：key 改为不含 display_sentence 的稳定值
+            if st.button("← Previous", key=f"prev_btn_v3_{book_name}", use_container_width=True):
                 leave_time = time.time()
                 enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
                 dwell_secs = round(leave_time - enter_time, 2)
@@ -2294,7 +2360,14 @@ function copyText2(){{_doCopy();}}
 
     with ctrl_col4:
         if display_sentence < max_view:
-            if st.button("Next →", key=f"next_btn_v3_{book_name}_{display_sentence}", use_container_width=True):
+            # 修复："跳到27句后点Next却显示46句"：这个按钮的 key 里之前带着
+            # display_sentence，每次跳转句子后 key 都会变——这是 Streamlit
+            # 里已知会导致"按钮点击状态跟当前显示的句子对不上"的反模式
+            # （key 变化 = Streamlit 认为这是全新的另一个 widget，可能读到
+            # 上一次渲染时的旧 key 对应的状态）。改成不含 display_sentence
+            # 的稳定 key，具体跳到第几句永远从 display_sentence 变量现读，
+            # 不依赖 key 本身携带位置信息。
+            if st.button("Next →", key=f"next_btn_v3_{book_name}", use_container_width=True):
                 leave_time = time.time()
                 enter_time = st.session_state["_sentence_enter_time"].get(enter_key, leave_time)
                 dwell_secs = round(leave_time - enter_time, 2)

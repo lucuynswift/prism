@@ -1,0 +1,25 @@
+name: Deploy PRISM App
+
+# 当代码 push 到 main 分支时触发
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Deploy to Server via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          cd /opt/prism/app/
+          git fetch --all
+          git reset --hard origin/main
+          sudo systemctl restart prism-app
